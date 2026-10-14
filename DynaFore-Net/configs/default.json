@@ -1,0 +1,18 @@
+{
+  "lookback": 288,
+  "pred_len": 16,
+  "epochs": 20,
+  "min_epochs": 6,
+  "patience": 4,
+  "scheduler_patience": 2,
+  "batch_size": 256,
+  "d_model": 32,
+  "layers": 1,
+  "lr": 0.001,
+  "dropout": 0.1,
+  "seed": 20261011,
+  "threads": 4,
+  "max_train": 0,
+  "max_val": 0,
+  "max_test": 0
+}

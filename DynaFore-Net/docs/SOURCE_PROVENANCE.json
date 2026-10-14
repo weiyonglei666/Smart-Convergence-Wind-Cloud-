@@ -1,0 +1,26 @@
+{
+  "project": "DynaFore-Net",
+  "packaging_date": "2026-10-14",
+  "source_version": "formal station-wise 16-step measured-future-weather implementation",
+  "files": [
+    {
+      "source": "release/fd0003_l5_open_source_project/src/fd0003/paper_models.py",
+      "sha256": "32342848469e6a9ac0f0088f0ee0643e75475ef809af0185d0ae4d4593771d72"
+    },
+    {
+      "source": "release/fd0003_l5_open_source_project/src/fd0003/deep_models.py",
+      "sha256": "c4e487045505e2ea7d790fac16f066bb69239c2e31fe8be9ffbc129100faa0a0"
+    },
+    {
+      "source": "release/fd0003_l5_open_source_project/src/fd0003/metrics.py",
+      "sha256": "afbc78a22232bc43059a8f0f7861d9cc593090487267905c89088f4ebbb03f16"
+    },
+    {
+      "source": "scripts/run_multistation_comparison.py",
+      "sha256": "18f23810cc26663efe66d1816a4663ca374b16832584ea199b87be2c02154efa"
+    }
+  ],
+  "scope": "Only model, augmentation, local attention, preprocessing and DynaFore training/evaluation logic extracted. No datasets, weights, results or upstream baseline repository files copied.",
+  "modifications_document": "IMPLEMENTATION.md",
+  "license": "Original research-use terms retained by explicit user instruction"
+}

@@ -1,0 +1,12 @@
+include README.md README_EN.md LICENSE DATA_AVAILABILITY.md THIRD_PARTY_NOTICES.md
+recursive-include configs *.json
+recursive-include docs *.md *.json
+recursive-include tests *.py
+recursive-include scripts *.py
+global-exclude *.csv *.tsv *.xlsx *.npy *.npz *.pt *.pth *.ckpt *.pkl *.parquet *.nc *.log
+global-exclude __pycache__ *.py[cod]
+prune data
+prune datasets
+prune outputs
+prune runs
+prune build

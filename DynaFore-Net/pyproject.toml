@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dynafore-net"
+version = "0.1.0"
+description = "DynaFore-Net for station-wise 16-step wind and photovoltaic power forecasting"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Research-Use"
+license-files = ["LICENSE"]
+dependencies = ["numpy>=1.24,<3", "pandas>=2,<4", "torch>=2.2,<3"]
+
+[project.scripts]
+dynafore = "dynafore_net.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.exclude-package-data]
+"*" = ["*.csv", "*.npy", "*.npz", "*.pt", "*.pth", "*.pkl"]

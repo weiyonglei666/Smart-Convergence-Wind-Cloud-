@@ -1,0 +1,36 @@
+# Private station data: never commit.
+data/
+datasets/
+raw/
+outputs/
+runs/
+checkpoints/
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.npy
+*.npz
+*.parquet
+*.h5
+*.hdf5
+*.nc
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.pickle
+*.log
+*.zip
+# Generated/build/environment files.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+.DS_Store
+.env
+.env.*

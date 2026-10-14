@@ -1,0 +1,14 @@
+<template><AdminLayout><section class="detail"><div class="detail-head"><div><p class="eyebrow">STATION DETAIL</p><h1>{{ stationId }} <span>{{ station?.station_type === 'pv' ? '光伏' : '风电' }}</span></h1><p>经纬度 {{ station?.longitude ?? '—' }}，{{ station?.latitude ?? '—' }} · 装机 {{ station?.capacity_mw ?? '—' }} MW</p></div><DataFreshnessBadge :freshness="snapshot?.freshness || 'unavailable'" /></div><div class="detail-grid"><div class="detail-card"><label>实时功率</label><strong>{{ snapshot?.active_power_mw ?? '—' }} <small>MW</small></strong></div><div class="detail-card"><label>理论功率</label><strong>{{ snapshot?.theory_power_mw ?? '—' }} <small>MW</small></strong></div><div class="detail-card"><label>可用功率</label><strong>{{ snapshot?.available_power_mw ?? '—' }} <small>MW</small></strong></div><div class="detail-card"><label>观测时间</label><strong class="small">{{ snapshot?.observed_at ? new Date(snapshot.observed_at).toLocaleString('zh-CN') : '暂无数据' }}</strong></div></div><PanelFrame title="功率与预测" meta="接口已预留"><div class="detail-empty">实时序列与模型预测将从统一 API 加载</div></PanelFrame></section></AdminLayout></template>
+<script setup lang="ts">
+import { onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
+import AdminLayout from '../../layouts/AdminLayout.vue'
+import PanelFrame from '../../components/dashboard/PanelFrame.vue'
+import DataFreshnessBadge from '../../components/dashboard/DataFreshnessBadge.vue'
+import { platformApi } from '../../api/platform'
+import { usePlatformStore } from '../../stores/platform'
+import type { Snapshot, Station } from '../../api/types'
+const route = useRoute(); const store = usePlatformStore(); const stationId = String(route.params.id); const station = ref<Station>(); const snapshot = ref<Snapshot>()
+onMounted(async () => { station.value = store.stations.find(x => x.station_id === stationId); try { snapshot.value = await platformApi.snapshot(stationId) } catch { snapshot.value = undefined } })
+</script>
+<style scoped>.detail-head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px}.eyebrow{color:#55cdeb;font-size:10px;letter-spacing:.22em}.detail h1{margin:8px 0;font-size:30px}.detail h1 span{font-size:13px;color:#6f94a8;font-weight:400;margin-left:8px}.detail-head p:last-child{color:#7899ab;font-size:12px}.detail-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}.detail-card{padding:20px;border:1px solid rgba(75,190,224,.2);background:rgba(10,39,62,.6)}.detail-card label{display:block;color:#7896a8;font-size:11px}.detail-card strong{display:block;margin-top:14px;color:#dffaff;font:24px ui-monospace,monospace}.detail-card small{color:#60cfe9;font:11px sans-serif}.detail-card .small{font:14px sans-serif}.detail-empty{height:260px;display:grid;place-items:center;color:#6e8da0;font-size:12px}</style>

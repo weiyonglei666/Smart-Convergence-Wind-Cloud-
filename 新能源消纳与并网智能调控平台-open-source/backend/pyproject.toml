@@ -1,0 +1,17 @@
+[project]
+name = "new-energy-platform-backend"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.29",
+  "pydantic-settings>=2.0",
+  "pymysql>=1.1",
+  "pandas>=2.0",
+  "httpx>=0.27",
+  "pypdf>=5.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+nwp = ["xarray>=2024.1", "cfgrib>=0.9.14"]

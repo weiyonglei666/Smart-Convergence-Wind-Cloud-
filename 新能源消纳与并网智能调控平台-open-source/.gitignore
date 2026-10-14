@@ -1,0 +1,53 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Node / Vue
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+*.vue.js
+*.vue.d.ts
+
+# Runtime data and model artifacts
+data/weather/*
+!data/weather/README.md
+backend/data/powergridqa/*
+!backend/data/powergridqa/README.md
+*.grib
+*.grib2
+*.nc
+*.parquet
+*.csv
+*.xlsx
+*.jsonl
+*.faiss
+*.index
+*.bin
+*.pt
+*.pth
+*.safetensors
+
+# Logs and local tools
+*.log
+logs/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
