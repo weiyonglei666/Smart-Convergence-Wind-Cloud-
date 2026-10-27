@@ -5,13 +5,15 @@
 ```mermaid
 flowchart LR
     DB[(业务 MySQL)] --> API[FastAPI 数据适配与指标服务]
-    NWP[远程 NWP 文件源] --> JOB[定时同步与最近网格裁剪]
+    NWP[远程 NWP 文件源] --> JOB[定时同步、双线性空间插值与15分钟时间插值]
     JOB --> SNAP[(本地 NWP 快照)]
     SNAP --> API
-    KB[(私有知识库)] --> AGENT[多智能体 / RAG]
+    KB[(data/knowledge 知识语料)] --> AGENT[五智能体 / Disco-RAG]
     API --> AGENT
     API --> WEB[Vue 3 + ECharts]
     AGENT --> WEB
 ```
+
+消纳指标只使用实际功率与可利用功率：`弃电 = max(0, 可利用 - 实际)`，`消纳率 = 实际 / 可利用`。`data/powergridqa/` 是评测集，不进入知识检索。
 
 生产环境需要在平台之外补充反向代理、TLS、正式身份认证、权限控制、集中日志和密钥管理。智能体输出仅用于辅助决策，不能绕过调度授权与安全校核。

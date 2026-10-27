@@ -4,11 +4,11 @@ from dataclasses import dataclass
 
 from langchain_core.documents import Document
 
-from src.generation.disco_rag import DiscoRagGenerator
-from src.planning.planner import Plan, Planner
-from src.rhetorical_graph.graph import GraphBuilder, RhetoricalGraph
-from src.rst_tree.parser import RstParser
-from src.rst_tree.tree import RstTree
+from ..src.generation.disco_rag import DiscoRagGenerator
+from ..src.planning.planner import Plan, Planner
+from ..src.rhetorical_graph.graph import GraphBuilder, RhetoricalGraph
+from ..src.rst_tree.parser import RstParser
+from ..src.rst_tree.tree import RstTree
 
 from .cloud_llm import ChatCloudLLM
 from .index import VectorIndex
@@ -26,13 +26,16 @@ class DiscoPipelineResult:
 class CloudDiscoRAGPipeline:
     """Official Disco-RAG structure pipeline backed by a cloud chat model."""
 
-    def __init__(self, index: VectorIndex, llm: ChatCloudLLM, top_k: int = 5):
+    def __init__(self, index: VectorIndex, llm: ChatCloudLLM, top_k: int = 10, *, rst_cache=None, require_rst_cache: bool = False):
         self.index = index
         self.llm = llm
         self.top_k = top_k
-        self.rst_parser = RstParser(llm)
-        self.graph_builder = GraphBuilder(llm)
-        self.planner = Planner(llm)
+        # Structure stages use a 256-token budget; the final answer keeps the
+        # configured 1024-token budget, matching the report's parameter table.
+        stage_llm = ChatCloudLLM(llm._client, llm.model_name, output_language=llm.output_language, max_tokens_override=256)
+        self.rst_parser = RstParser(stage_llm, cache=rst_cache, require_cache=require_rst_cache)
+        self.graph_builder = GraphBuilder(stage_llm)
+        self.planner = Planner(stage_llm)
         self.generator = DiscoRagGenerator(llm)
 
     def run(self, query: str) -> DiscoPipelineResult:

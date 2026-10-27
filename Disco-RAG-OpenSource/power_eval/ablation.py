@@ -8,15 +8,16 @@ from langchain_core.documents import Document
 METHODS = ['disco_full', 'without_rst', 'without_graph', 'without_planning', 'standard_rag']
 
 class AblationAnswerer:
-    def __init__(self, client, index, method):
+    def __init__(self, client, index, method, rst_cache=None, require_rst_cache=False):
         if method not in METHODS:
             raise ValueError(method)
         self.client, self.index, self.method = client, index, method
-        self.top_k = getattr(getattr(client, 'config', None), 'top_k', 5)
+        self.top_k = getattr(getattr(client, 'config', None), 'top_k', 10)
         self.llm = ChatCloudLLM(client, client.config.model, output_language='English')
         self.pipeline = CloudDiscoRAGPipeline(index, self.llm, top_k=self.top_k,
             use_rst=method != 'without_rst', use_graph=method != 'without_graph',
-            use_planning=method != 'without_planning')
+            use_planning=method != 'without_planning', rst_cache=rst_cache,
+            require_rst_cache=require_rst_cache)
 
     def answer(self, question):
         if self.method in METHODS[:4]:

@@ -33,10 +33,10 @@ python -m dynafore_net --help
 原始 CSV 由用户自行获取并保存在项目外部目录。文件名与字段要求见 [DATA_AVAILABILITY.md](DATA_AVAILABILITY.md)。容量必须来自场站资料或用户提供的 JSON，不从测试集功率反推。
 
 ```bash
-dynafore prepare --raw-dir /path/to/private_csvs --output outputs
+dynafore prepare --raw-dir /path/to/private_csvs --nwp-dir /path/to/private_nwp --output outputs
 ```
 
-如果没有场站容量元数据 CSV，可传入 `--capacity-json /path/to/capacities.json`，文件结构为 `{ "场站ID": 容量MW }`。不要将该私人文件提交到仓库。
+如果没有场站容量元数据 CSV，可传入 `--capacity-json /path/to/capacities.json`，文件结构为 `{ "场站ID": 容量MW }`。不要将该私人文件提交到仓库。NWP 文件按场站命名，字段与时间规则见 [DATA_AVAILABILITY.md](DATA_AVAILABILITY.md)。
 
 ## 分场站训练
 
@@ -55,7 +55,7 @@ dynafore train --output outputs --station FD0003 --device cuda:0
 从原始数据一键准备并训练：
 
 ```bash
-dynafore run --raw-dir /path/to/private_csvs --output outputs --device cuda:0
+dynafore run --raw-dir /path/to/private_csvs --nwp-dir /path/to/private_nwp --output outputs --device cuda:0
 ```
 
 `--device` 默认是 `cpu`；GPU 需显式指定。已有缓存或模型默认不覆盖；需要重新运行时，请使用新输出目录，或明确传入 `--overwrite`。
@@ -65,10 +65,12 @@ dynafore run --raw-dir /path/to/private_csvs --output outputs --device cuda:0
 使用新的输出目录运行完整模型及四组消融：
 
 ```bash
-dynafore run --raw-dir /path/to/private_csvs --output outputs_ablations \
+dynafore run --raw-dir /path/to/private_csvs --nwp-dir /path/to/private_nwp --output outputs_ablations \
   --variants full noPMD-PVA-TRA noNSAN noAutoDA "noguided correction" \
   --device cuda:0
 ```
+
+如需复现实验中的实测未来气象消融，显式加入 `--future-source measured`；该模式不使用 NWP，结果不能与在线 NWP 条件混用。
 
 `noAutoDA` 同时关闭其附属细粒度重构；`noPMD-PVA-TRA` 关闭局部均值解耦、PVA 和 TRA 的均值恢复，保留基础时间自注意力。`noguided correction` 关闭机理残差修正，保留输出物理边界与光伏昼夜掩码。
 
@@ -93,11 +95,13 @@ dynafore summarize --output outputs
 
 ## 默认参数与评价口径
 
-历史窗口 288 点（72 h），预测长度 16；patch 长度/步长均为 16；隐藏维度 32；4 个注意力头；1 层 TRA；dropout 0.1；batch size 256。AdamW 初始学习率 `1e-3`，weight decay `1e-4`，梯度范数上限 1。
+风电历史窗口 288 点（72 h），光伏历史窗口 96 点（24 h），预测长度 16；输入维度固定为历史 17 / 未来 18。patch 长度/步长均为 16；隐藏维度 32；4 个注意力头；1 层 PVA、1 层 TRA；前馈维度 128；NSAN 统计窗口 72 步；多尺度池化 1/2/4；AutoDA 3 层 × 6 个候选操作；dropout 0.1；batch size 256。AdamW 初始学习率 `1e-3`，weight decay `1e-4`，梯度范数上限 1。
+
+训练目标为文档给出的组合损失：近端加权 MSE、`0.15 ×` 业务 ACC 代理项、爬坡差分约束、原样本/增强样本一致性、频域与统计对齐，以及功率越界/光伏夜间泄漏的机理惩罚。各项权重可在 `configs/default.json` 中调整。
 
 按有效预测起点顺序 70%/15%/15% 划分训练/验证/测试，清除标签跨越下一集合边界的窗口。仅训练窗口拟合标准化统计量。最多训练 20 epoch，至少 6 epoch 后允许早停；验证 ACC@16 连续 4 个 epoch 未改善则停止。ReduceLROnPlateau 按验证 ACC@16 调节学习率，factor 0.5、patience 2、最低学习率 `1e-5`。
 
-**未来气象沿用当前实验的实测气象设置**：DynaFore-Net 使用预测区间对应的测风塔/气象站实测序列。这不是预测发布时刻已知的 NWP，不应把此条件下的测试精度描述为实际在线预报精度。历史气象只进行最多 4 步的前向填补，不使用后向填补或未来插值。详见 [实现与复现说明](docs/IMPLEMENTATION.md)。
+**未来条件默认读取 NWP**：`--future-source nwp` 要求 `--nwp-dir`，按文档执行 UTC→UTC+8、起报时间不晚于预测起点、3 h→15 min 线性插值。`--future-source measured` 是显式消融设置，使用预测区间实测气象；其 `meta.json` 标记为 `measured_future`，不能把该条件下的精度描述为在线 NWP 精度。详见 [数据格式说明](DATA_AVAILABILITY.md) 与 [实现与复现说明](docs/IMPLEMENTATION.md)。
 
 ## 测试与发布检查
 

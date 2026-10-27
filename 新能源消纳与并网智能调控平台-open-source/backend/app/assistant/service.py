@@ -15,7 +15,8 @@ import xml.etree.ElementTree as ET
 
 from app.adapters.stations import StationRepository
 from app.config import get_settings
-from app.services.time_alignment import classify_freshness
+from app.services.metrics import calculate_consumption
+from app.services.time_alignment import CN_TZ, classify_freshness
 from app.rag_config import load_backend_env
 
 # Tests and packaged launches can resolve ``app`` from an installed egg-info
@@ -26,10 +27,13 @@ _PROJECT_ROOT = _BACKEND_ROOT.parent
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
+from rag_core.power_eval.cloud_llm import ChatCloudLLM
 from rag_core.power_eval.config import PowerEvalConfig
-from rag_core.power_eval.corpus import PowerDocument, load_powergridqa
+from rag_core.power_eval.corpus import PowerDocument, load_knowledge_corpus
+from rag_core.power_eval.disco_pipeline import CloudDiscoRAGPipeline
 from rag_core.power_eval.index import SearchHit, VectorIndex
 from rag_core.power_eval.llm_client import DeepSeekClient
+from rag_core.src.rst_tree.cache import RstCache
 
 
 @dataclass(frozen=True)
@@ -44,18 +48,58 @@ class AssistantResult:
 
 _index: VectorIndex | None = None
 _documents: list[PowerDocument] = []
+_load_error = ""
 _index_lock = Lock()
 
 
-def _get_index() -> tuple[VectorIndex, list[PowerDocument]]:
-    global _index, _documents
+class _EmptyIndex:
+    """Placeholder when the private knowledge corpus has not been installed."""
+
+    documents: list[PowerDocument] = []
+
+    def search(self, query: str, top_k: int = 10) -> list[SearchHit]:
+        return []
+
+
+def _get_index() -> tuple[VectorIndex | _EmptyIndex, list[PowerDocument]]:
+    global _index, _documents, _load_error
     if _index is None:
         with _index_lock:
             if _index is None:
-                root = Path(__file__).resolve().parents[2] / "data" / "powergridqa"
-                _documents = load_powergridqa(root)
-                _index = VectorIndex(_documents)
+                root = Path(__file__).resolve().parents[2] / "data" / "knowledge"
+                try:
+                    _documents = load_knowledge_corpus(root)
+                    if not _documents:
+                        _load_error = f"Knowledge corpus is empty: {root}"
+                        _index = _EmptyIndex()  # type: ignore[assignment]
+                    else:
+                        _index = VectorIndex(_documents)
+                except Exception as exc:
+                    _load_error = str(exc)
+                    _documents = []
+                    _index = _EmptyIndex()  # type: ignore[assignment]
     return _index, _documents
+
+
+def _disco_knowledge(question: str, index: VectorIndex, settings: PowerEvalConfig):
+    """Run the documented Disco-RAG structure path for the knowledge agent."""
+    if settings.rag_mode != "disco" or not settings.api_key:
+        return None
+    cache_path = Path(settings.rst_cache) if settings.rst_cache else None
+    if cache_path is not None and not cache_path.is_absolute():
+        cache_path = _BACKEND_ROOT / cache_path
+    cache = RstCache.load(cache_path) if cache_path is not None else RstCache()
+    llm = ChatCloudLLM(DeepSeekClient(settings), settings.model, output_language="Chinese")
+    pipeline = CloudDiscoRAGPipeline(
+        index, llm, top_k=settings.top_k, rst_cache=cache, require_rst_cache=False,
+    )
+    result = pipeline.run(question)
+    if cache_path is not None:
+        try:
+            cache.save(cache_path)
+        except OSError:
+            pass
+    return result
 
 
 def _live_snapshot(repo: StationRepository, station_id: str) -> dict[str, Any]:
@@ -68,6 +112,9 @@ def _live_snapshot(repo: StationRepository, station_id: str) -> dict[str, Any]:
         return {"station_id": station_id, "available": False, "station_type": station.station_type, "weather": weather}
     now = datetime.now(timezone.utc)
     freshness = classify_freshness(snapshot.observed_at, now)
+    consumption = calculate_consumption(
+        snapshot.active_power_mw, snapshot.theory_power_mw, snapshot.available_power_mw, snapshot.limit_mark,
+    )
     return {
         "station_id": station_id,
         "station_type": station.station_type,
@@ -79,6 +126,11 @@ def _live_snapshot(repo: StationRepository, station_id: str) -> dict[str, Any]:
         "available_power_mw": snapshot.available_power_mw,
         "limit_mark": snapshot.limit_mark,
         "weather": weather,
+        "consumption": {
+            "utilization_rate": consumption.utilization_rate,
+            "curtailed_mw": consumption.curtailed_mw,
+            "curtailment_rate": consumption.curtailment_rate,
+        },
     }
 
 
@@ -114,6 +166,9 @@ def _live_context(repo: StationRepository, station_id: str | None) -> dict[str, 
         rows = list(pool.map(lambda item: _live_snapshot(repo, item.station_id), stations))
     online = sum(1 for row in rows if row.get("available"))
     total_active = sum((row.get("active_power_mw") or 0) for row in rows)
+    total_theory = sum((row.get("theory_power_mw") or 0) for row in rows)
+    total_available = sum((row.get("available_power_mw") or 0) for row in rows)
+    aggregate = calculate_consumption(total_active, total_theory, total_available, None)
     def trend(item):
         end = datetime.now(timezone.utc)
         values = repo.power_series(item.station_id, end - timedelta(hours=1), end)[-5:]
@@ -121,7 +176,9 @@ def _live_context(repo: StationRepository, station_id: str | None) -> dict[str, 
         return {"station_id": item.station_id, "points": len(numbers), "start_mw": round(numbers[0], 3) if numbers else None, "end_mw": round(numbers[-1], 3) if numbers else None, "min_mw": round(min(numbers), 3) if numbers else None, "max_mw": round(max(numbers), 3) if numbers else None}
     with ThreadPoolExecutor(max_workers=6) as pool:
         trends = list(pool.map(trend, stations))
-    return {"scope": "ALL", "online": online, "total": len(rows), "total_active_power_mw": round(total_active, 3), "stations": rows, "recent_power_1h_summary": trends}
+    return {"scope": "ALL", "online": online, "total": len(rows), "total_active_power_mw": round(total_active, 3), "total_available_power_mw": round(total_available, 3),
+            "consumption": {"utilization_rate": aggregate.utilization_rate, "curtailed_mw": aggregate.curtailed_mw, "curtailment_rate": aggregate.curtailment_rate},
+            "stations": rows, "recent_power_1h_summary": trends}
 
 
 def _station_nwp_context(station_id: str) -> dict[str, Any]:
@@ -135,8 +192,11 @@ def _station_nwp_context(station_id: str) -> dict[str, Any]:
         for row in payload.get("stations", []):
             if row.get("station_id") != station_id or not row.get("valid_time_utc"):
                 continue
-            valid = str(row["valid_time_utc"])
-            point = grouped.setdefault(valid, {"valid_time_utc": valid, "variables": {}})
+            valid_utc = str(row["valid_time_utc"])
+            valid_cn = row.get("valid_time_cn")
+            if not valid_cn:
+                valid_cn = datetime.fromisoformat(valid_utc.replace("Z", "+00:00")).astimezone(CN_TZ).isoformat()
+            point = grouped.setdefault(valid_cn, {"valid_time_utc": valid_utc, "valid_time_cn": valid_cn, "variables": {}})
             point["variables"].update(row.get("variables") or {})
         all_points = [grouped[key] for key in sorted(grouped)]
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
@@ -199,11 +259,9 @@ def _control_plan(question: str, live: dict[str, Any]) -> dict[str, Any]:
             continue
         station = row.get("station_id", "场站")
         actual = row.get("active_power_mw")
-        theory = row.get("theory_power_mw")
         available = row.get("available_power_mw")
-        if theory is not None and actual is not None:
-            base = available if available is not None else theory
-            curtailed = max(0.0, float(base) - float(actual))
+        if available is not None and actual is not None:
+            curtailed = max(0.0, float(available) - float(actual))
             if curtailed > 0.05:
                 evidence.append(f"{station} 可利用功率与实际功率差 {curtailed:.2f} MW")
                 actions.append({"station_id": station, "action": "核查调度限额、送出断面和AGC指令，确认可利用功率是否可释放", "priority": "high"})
@@ -312,16 +370,43 @@ def answer_question(question: str, repo: StationRepository, station_id: str | No
     control = _control_plan(question, live)
     steps = [{"agent": "问题理解智能体", "status": "done", "detail": f"已形成初步意图：{intent}；最终回答以当前问题和对话语义为准"}]
     steps.append({"agent": "实时数据智能体", "status": "done", "detail": "已读取实时快照、历史功率/气象、超短期功率预测与未来 NWP"})
+    forecast = live.get("ultra_short_power_forecast") or {}
+    nwp = live.get("nwp_forecast_4h") or {}
+    forecast_points = len(forecast.get("points") or [])
+    steps.append({
+        "agent": "预测分析智能体",
+        "status": "done" if forecast_points or nwp.get("available") else "empty",
+        "detail": (
+            f"预测批次 {forecast.get('issue_at') or '—'}，{forecast_points} 个未来点；"
+            f"NWP {'已接入' if nwp.get('available') else '未接入'}"
+        ),
+    })
+    settings = PowerEvalConfig.from_env(require_api_key=False)
     index, _ = _get_index()
-    hits = index.search(question, 5)
+    hits = index.search(question, settings.top_k)
     useful_hits = [hit for hit in hits if hit.score >= 0.08]
-    steps.append({"agent": "知识检索智能体", "status": "done" if useful_hits else "empty", "detail": f"命中 {len(useful_hits)} 条相关知识" if useful_hits else "知识库没有检索到足够相关内容"})
+    disco_result = None
+    if useful_hits and settings.api_key and settings.rag_mode == "disco":
+        try:
+            disco_result = _disco_knowledge(question, index, settings)
+            steps.append({
+                "agent": "知识检索智能体",
+                "status": "done",
+                "detail": f"Disco-RAG 结构化证据：{len(disco_result.trees)} 个 RST 树、修辞图、话语规划",
+            })
+        except Exception as exc:
+            steps.append({
+                "agent": "知识检索智能体",
+                "status": "fallback",
+                "detail": f"Disco-RAG 结构阶段不可用，退回片段检索：{type(exc).__name__}",
+            })
+    if disco_result is None:
+        steps.append({"agent": "知识检索智能体", "status": "done" if useful_hits else "empty", "detail": f"命中 {len(useful_hits)} 条相关知识" if useful_hits else "知识库没有检索到足够相关内容"})
     web_results = _web_search(question) if use_web_search else []
     if use_web_search:
         steps.append({"agent": "联网搜索智能体", "status": "done" if web_results else "empty", "detail": f"检索到 {len(web_results)} 条公开网页资料" if web_results else "本次联网搜索未返回可用结果"})
     source_rows = [{"source_id": hit.document.source_id, "score": round(hit.score, 4), "title": "知识库依据", "excerpt": hit.document.text[:360]} for hit in useful_hits]
     source_rows.extend({"source_id": item["url"], "score": 1.0, "title": item["title"], "excerpt": item["snippet"]} for item in web_results)
-    settings = PowerEvalConfig.from_env(require_api_key=False)
     if not settings.api_key:
         steps.append({"agent": "报告生成智能体", "status": "fallback", "detail": "未配置模型 API Key，使用实时数据与通用调控规则生成建议"})
         fallback = _live_fallback(question, live) if live_needed else _general_fallback(question, bool(useful_hits))
@@ -329,6 +414,13 @@ def answer_question(question: str, repo: StationRepository, station_id: str | No
             fallback += "\n\n调控目标：" + control["objective"] + "。\n" + "\n".join(f"- {item['station_id']}：{item['action']}" for item in control["actions"])
         return AssistantResult(_humanize_answer(fallback), source_rows, steps, {**live, "control_plan": control} if live_needed else live, "live_fallback" if live_needed else "general", "medium" if useful_hits else "low")
     context = "\n".join(f"[{hit.document.source_id}] {hit.document.text}" for hit in useful_hits)
+    if disco_result is not None:
+        context += (
+            "\n\n[Disco-RAG 知识结论]\n" + disco_result.answer
+            + "\n\n[块内 RST 结构]\n" + "\n".join(tree.serialize() for tree in disco_result.trees)
+            + "\n\n[跨块修辞图]\n" + disco_result.graph.serialize()
+            + "\n\n[话语规划]\n" + disco_result.plan.serialize()
+        )
     web_context = "\n".join(f"[{item['title']}] {item['snippet']} 来源：{item['url']}" for item in web_results)
     history_rows = []
     for item in (history or [])[-8:]:
@@ -345,7 +437,7 @@ def answer_question(question: str, repo: StationRepository, station_id: str | No
         "query": "如果用户是在查询数值或状态，先用一两句话直接回答，再补充必要的时间戳和数据来源。",
         "general": "按自然对话回答，围绕用户问题给出最短充分答案；只有用户明确要求时才写报告。",
     }[intent]
-    prompt = f"最近对话上下文：{history_context or '无'}\n当前问题：{question}\n规则引擎给出的初步意图（仅在语义不明确或模型不可用时兜底）：{intent}\n调控目标参考：{_control_objective(question)}\n运行数据上下文（必须优先使用）：{live_text}\n其中 recent_power_4h 是最近4小时15分钟历史功率，recent_weather_4h 是测风塔/辐照度历史观测，ultra_short_power_forecast 是历史对比加未来4小时功率预测，nwp_forecast_4h 是UTC时间的未来NWP；分析时将NWP时间按UTC+8理解，历史观测本身已是UTC+8。\n规则引擎初步调控计划：{control}\n知识库资料：{context or '本次未命中专用知识库'}\n联网公开资料：{web_context or '本次未开启联网搜索或未命中公开资料'}\n请把语义理解放在规则标签之前：结合当前问题、语气、疑问词和最近对话判断用户真正想要查询、解释、建议还是正式报告。若语义与初步意图不一致，以语义为准。实时数据始终以本轮读取结果为准，不要声称未请求实时数据。{style}知识库未命中时允许使用通用电力系统知识，但必须明确标注为通用建议。不要虚构调度指令、设备状态或未提供的历史措施。面向调度员输出自然语言，不要输出 Python 字典、JSON、key=value 字段串或 None/True/False；时间、功率、风速和限电状态请改写成中文标签和单位。联网资料仅作补充，必须保留来源链接，不得用它覆盖实时场站数据或调度规程。最终可见答案控制在 1200 个中文字符以内，优先回答用户当前问题，不要重复上下文。"
+    prompt = f"最近对话上下文：{history_context or '无'}\n当前问题：{question}\n规则引擎给出的初步意图（仅在语义不明确或模型不可用时兜底）：{intent}\n调控目标参考：{_control_objective(question)}\n运行数据上下文（必须优先使用）：{live_text}\n其中 recent_power_4h 是最近4小时15分钟历史功率，recent_weather_4h 是测风塔/辐照度历史观测，ultra_short_power_forecast 是历史对比加未来4小时功率预测，nwp_forecast_4h 是已完成UTC→UTC+8转换、并插值为15分钟的未来NWP（同时保留原始UTC时间）。\n规则引擎初步调控计划：{control}\n知识库资料：{context or '本次未命中专用知识库'}\n联网公开资料：{web_context or '本次未开启联网搜索或未命中公开资料'}\n请把语义理解放在规则标签之前：结合当前问题、语气、疑问词和最近对话判断用户真正想要查询、解释、建议还是正式报告。若语义与初步意图不一致，以语义为准。实时数据始终以本轮读取结果为准，不要声称未请求实时数据。{style}知识库未命中时允许使用通用电力系统知识，但必须明确标注为通用建议。不要虚构调度指令、设备状态或未提供的历史措施。面向调度员输出自然语言，不要输出 Python 字典、JSON、key=value 字段串或 None/True/False；时间、功率、风速和限电状态请改写成中文标签和单位。联网资料仅作补充，必须保留来源链接，不得用它覆盖实时场站数据或调度规程。最终可见答案控制在 1200 个中文字符以内，优先回答用户当前问题，不要重复上下文。"
     try:
         answer = DeepSeekClient(settings).generate([{"role": "system", "content": "你是新能源消纳与并网智能调控平台的报告智能体。"}, {"role": "user", "content": prompt}])
     except Exception as exc:

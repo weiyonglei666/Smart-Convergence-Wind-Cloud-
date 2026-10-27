@@ -1,5 +1,6 @@
 {
   "lookback": 288,
+  "lookback_pv": 96,
   "pred_len": 16,
   "epochs": 20,
   "min_epochs": 6,
@@ -14,5 +15,15 @@
   "threads": 4,
   "max_train": 0,
   "max_val": 0,
-  "max_test": 0
+  "max_test": 0,
+  "future_source": "nwp",
+  "n_heads": 4,
+  "d_ff": 128,
+  "nsan_window": 72,
+  "loss_step_decay": 0.02,
+  "loss_ramp": 0.05,
+  "loss_consistency": 0.1,
+  "loss_frequency": 0.01,
+  "loss_statistics": 0.01,
+  "loss_mechanism": 0.05
 }

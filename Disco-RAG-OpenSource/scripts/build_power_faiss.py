@@ -22,7 +22,7 @@ def main() -> None:
     ap.add_argument("--model", default="models/Qwen3-Embedding-8B")
     ap.add_argument("--output", default="indexes/power_public_qwen3e8b_faiss")
     ap.add_argument("--chunk-size", type=int, default=256)
-    ap.add_argument("--batch-size", type=int, default=4)
+    ap.add_argument("--batch-size", type=int, default=2)
     args = ap.parse_args()
 
     corpus = Path(args.corpus).resolve()

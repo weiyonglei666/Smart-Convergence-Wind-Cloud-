@@ -15,10 +15,13 @@ from .training import DYNAFORE_ABLATIONS, train_station
 from .utils import write_json
 
 DEFAULTS = {
-    "lookback": 288, "pred_len": 16, "epochs": 20, "min_epochs": 6, "patience": 4,
+    "lookback": 288, "lookback_pv": 96, "pred_len": 16, "epochs": 20, "min_epochs": 6, "patience": 4,
     "scheduler_patience": 2, "batch_size": 256, "d_model": 32, "layers": 1,
     "lr": .001, "dropout": .1, "seed": 20261011, "threads": 4,
     "max_train": 0, "max_val": 0, "max_test": 0,
+    "future_source": "nwp", "n_heads": 4, "d_ff": 128, "nsan_window": 72,
+    "loss_step_decay": 0.02, "loss_ramp": 0.05, "loss_consistency": 0.10,
+    "loss_frequency": 0.01, "loss_statistics": 0.01, "loss_mechanism": 0.05,
 }
 PRIMARY_METRICS = ["MSE@16", "MAE@16", "nMAE@16", "nRMSE@16", "ACC@16"]
 
@@ -39,6 +42,7 @@ def parse_args(argv=None):
     parser.add_argument("--config", type=Path, help="Optional JSON training configuration")
     parser.add_argument("--raw-dir", type=Path, help="User-supplied private CSV directory")
     parser.add_argument("--capacity-json", type=Path, help="JSON mapping station IDs to capacity in MW")
+    parser.add_argument("--nwp-dir", type=Path, help="Station-level NWP CSV directory (required for --future-source nwp)")
     parser.add_argument("--output", type=Path, default=Path("outputs"))
     parser.add_argument("--station", nargs="+", help="Station IDs; default: all discovered/prepared stations")
     parser.add_argument("--variants", nargs="+", choices=DYNAFORE_ABLATIONS, default=["full"])
@@ -49,8 +53,18 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.pred_len != 16:
         parser.error("This release uses exactly 16 forecast steps")
-    if args.lookback < 32 or args.lookback % 16:
-        parser.error("--lookback must be a multiple of 16 and at least 32")
+    for name in ("lookback", "lookback_pv"):
+        value = getattr(args, name)
+        if value < 32 or value % 16:
+            parser.error(f"--{name.replace('_', '-')} must be a multiple of 16 and at least 32")
+    if args.future_source not in {"nwp", "measured"}:
+        parser.error("--future-source must be 'nwp' or 'measured'")
+    if args.future_source == "nwp" and args.action in {"prepare", "run"} and args.nwp_dir is None:
+        parser.error("--future-source nwp requires --nwp-dir with station-level NWP CSV files")
+    if args.n_heads <= 0 or args.d_model % args.n_heads:
+        parser.error("--d-model must be divisible by --n-heads")
+    if args.d_ff <= 0 or args.nsan_window < 2:
+        parser.error("--d-ff and --nsan-window must be positive")
     if min(args.epochs, args.min_epochs, args.patience, args.batch_size, args.threads, args.layers) < 1:
         parser.error("Epoch, patience, batch, thread and layer settings must be positive")
     if args.min_epochs > args.epochs:
@@ -78,10 +92,16 @@ def prepare_all(args):
              for station, (kind, path) in sorted(found.items()) if station in wanted]
     write_json(manifest, metas)
     write_json(args.output / "protocol.json", {
-        "model": "DynaFore-Net", "lookback": args.lookback, "pred_len": 16, "sampling_minutes": 15,
+        "model": "DynaFore-Net", "lookback_wind": args.lookback, "lookback_pv": args.lookback_pv,
+        "pred_len": 16, "sampling_minutes": 15,
+        "history_features": 17, "future_features": 18,
         "split": "chronological 70/15/15 with target-overlap purge",
-        "future_weather_source": "measured_future",
-        "future_weather_note": "Task-permitted future measured tower/qxz observations, not causally available NWP",
+        "future_weather_source": "nwp" if args.future_source == "nwp" else "measured_future",
+        "future_weather_note": (
+            "ECMWF-style NWP; issue_time <= forecast origin; UTC to UTC+8; 15-minute linear interpolation"
+            if args.future_source == "nwp" else
+            "explicit ablation with future measured tower/qxz observations; not operational NWP"
+        ),
         "missing_weather": "causal forward fill up to 4 steps; no backward fill",
         "capacity": "must be supplied; never estimated from test targets",
         "window_limits": {key: getattr(args, key) for key in ["max_train", "max_val", "max_test"]},

@@ -10,22 +10,22 @@ Python >= 3.10; install an appropriate PyTorch build for your device.
 
 ```bash
 python -m pip install -e .
-dynafore run --raw-dir /path/to/private_csvs --output outputs --device cpu
+dynafore run --raw-dir /path/to/private_csvs --nwp-dir /path/to/private_nwp --output outputs --device cpu
 ```
 
 For raw CSV filenames, columns, and capacity metadata, see [DATA_AVAILABILITY.md](DATA_AVAILABILITY.md). Paths are supplied at runtime; no private server path is required.
 
 ```bash
-dynafore run --raw-dir /path/to/private_csvs --output outputs_ablations \
+dynafore run --raw-dir /path/to/private_csvs --nwp-dir /path/to/private_nwp --output outputs_ablations \
   --variants full noPMD-PVA-TRA noNSAN noAutoDA "noguided correction"
 dynafore evaluate --output outputs
 python -m unittest discover -s tests -v
 python scripts/check_release.py
 ```
 
-Each station is trained independently. Defaults: 288 historical samples, 16 forecast steps at 15-minute resolution, chronological 70/15/15 splits with target-overlap purge, train-only scaling, up to 20 epochs, validation ACC early stopping, and ReduceLROnPlateau. Reports include MSE, MAE, nMAE, nRMSE, ACC and per-station first-place counts.
+Each station is trained independently. Defaults: 288 historical samples for wind, 96 for PV, 16 forecast steps at 15-minute resolution, fixed 17/18 input dimensions, chronological 70/15/15 splits with target-overlap purge, train-only scaling, up to 20 epochs, validation ACC early stopping, and ReduceLROnPlateau. Reports include MSE, MAE, nMAE, nRMSE, ACC and per-station first-place counts.
 
-**Weather protocol:** this version preserves the experiment's *future measured weather* input. It is not operationally available NWP. Historical missing weather is forward-filled for at most four steps. See [implementation notes](docs/IMPLEMENTATION.md) for the exact augmentation, metrics, ablations, and extraction changes.
+**Weather protocol:** the default future condition is NWP (`--future-source nwp`), with UTC→UTC+8 alignment, `ISSUE_TIME <= origin`, and 15-minute linear interpolation. `--future-source measured` is an explicit ablation using future measured weather; it is marked `measured_future` in `meta.json` and must not be reported as operational NWP accuracy. See [implementation notes](docs/IMPLEMENTATION.md).
 
 ## Terms
 

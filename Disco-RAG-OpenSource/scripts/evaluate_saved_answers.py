@@ -12,7 +12,7 @@ import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from power_eval.corpus import load_powergridqa
+from power_eval.corpus import load_knowledge_corpus
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUT = ROOT / 'results/powergridqa_qwen_translated_en'
@@ -22,7 +22,7 @@ CONFIG = dict(em='NFKC, lowercase, remove ASCII punctuation and English articles
               rouge='rouge-score 0.1.2, rougeL F1, use_stemmer=False',
               bert='bert-score 0.3.13, roberta-large layer17, idf=False, rescale_with_baseline=False',
               summac='summac 0.0.4, SummaCZS, vitc, sentence granularity, default aggregation, max_doc_sents=100, max_input_length=500',
-              art='original latency_seconds; includes online RST parsing; excludes translation/scoring')
+              art='original latency_seconds; reads the offline RST cache and includes graph/planning/generation; excludes offline cache construction and scoring')
 
 def load(path):
     rows = {}
@@ -36,7 +36,10 @@ def load(path):
     return rows
 
 def load_evidence_docs():
-    """Load chunk texts using source IDs emitted by the FAISS retriever."""
+    """Load chunk texts using source IDs emitted by the retriever."""
+    explicit = os.getenv('POWER_EVIDENCE_JSON', '')
+    if explicit and Path(explicit).exists():
+        return json.loads(Path(explicit).read_text(encoding='utf-8'))
     faiss_dir = os.getenv('POWER_FAISS_INDEX', '')
     if faiss_dir:
         evidence_json = Path(faiss_dir) / 'evidence_docs.json'
@@ -45,7 +48,8 @@ def load_evidence_docs():
         docstore, _ = pickle.load((Path(faiss_dir) / 'index.pkl').open('rb'))
         return {f"{doc.metadata.get('source_file', '')}:{doc.metadata.get('chunk_id', 0)}": doc.page_content for doc in docstore._dict.values()}
     root = os.getenv('POWER_CORPUS_ROOT', 'data/corpus')
-    return {d.source_id: d.text for d in load_powergridqa(root)}
+    # Debug-only fallback: the knowledge corpus is text, never the benchmark JSONL.
+    return {document.source_id: document.text for document in load_knowledge_corpus(root)}
 
 def normalize(text):
     text = unicodedata.normalize('NFKC', text).lower()

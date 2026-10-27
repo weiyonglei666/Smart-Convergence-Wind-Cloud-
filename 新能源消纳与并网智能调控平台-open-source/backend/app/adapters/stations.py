@@ -177,7 +177,12 @@ class StationRepository:
         connection = self.connection_factory()
         try:
             with connection.cursor() as cursor:
-                cursor.execute(query, (start.replace(tzinfo=None), end.replace(tzinfo=None)))
+                # Power/forecast tables store Beijing wall-clock timestamps;
+                # the API window is UTC, so convert the bounds before removing
+                # tzinfo for the MySQL comparison.
+                db_start = start.astimezone(CN_TZ).replace(tzinfo=None) if start.tzinfo else start
+                db_end = end.astimezone(CN_TZ).replace(tzinfo=None) if end.tzinfo else end
+                cursor.execute(query, (db_start, db_end))
                 rows = cursor.fetchall()
         finally:
             connection.close()
@@ -251,5 +256,6 @@ class StationRepository:
             errors = [predicted - actual for _, predicted, actual in values]
             absolute_sum = sum(abs(error) for error in errors)
             weighted_rmse = 0.0 if absolute_sum == 0 else sqrt(sum(error * error * abs(error) / absolute_sum for error in errors))
-            scores.append(max(0.0, 1.0 - weighted_rmse / station.capacity_mw))
+            # The documented ACC formula does not truncate negative scores.
+            scores.append(1.0 - weighted_rmse / station.capacity_mw)
         return {"station_id": station_id, "acc": round(sum(scores) / len(scores) * 100, 4) if scores else None, "run_count": len(scores), "window_points": window_points, "capacity_mw": station.capacity_mw}

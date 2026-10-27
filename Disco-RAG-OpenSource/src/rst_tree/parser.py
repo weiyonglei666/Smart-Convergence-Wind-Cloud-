@@ -6,6 +6,7 @@ from langchain_core.output_parsers import StrOutputParser
 
 from ..prompts import RST_TREE_PROMPT
 from ..prompts.relations import INTRA_RELATIONS
+from .cache import MissingRstCache, RstCache
 from .tree import EDU, RstRelation, RstTree
 
 if TYPE_CHECKING:
@@ -15,25 +16,38 @@ EDU_RE = re.compile(r"\[(\d+)\]\s*(.+)")
 REL_RE = re.compile(r"RELATION\(\s*EDU[_ ]?(\d+)\s*,\s*EDU[_ ]?(\d+)\s*\)\s*:\s*\{?([A-Z_]+)\}?")
 ROLE_RE = re.compile(r"(NUCLEUS|SATELLITE)\[(\d+)\]")
 
+# Kept for backwards compatibility with callers that import the old symbol.
 _OFFLINE_CACHE: Dict[Tuple[str, str], str] = {}
 
 
 class RstParser:
-    def __init__(self, llm: "ChatVllmBeamSearch"):
+    def __init__(self, llm: "ChatVllmBeamSearch", cache: RstCache | None = None, require_cache: bool = False):
         self.llm = llm
         self.chain = RST_TREE_PROMPT | llm | StrOutputParser()
+        self.cache = cache or RstCache()
+        self.require_cache = require_cache
 
     def parse_chunks(self, chunks: List[Document]) -> List[RstTree]:
         model = self.llm.model_name
-        pending = [c for c in chunks if (model, c.page_content) not in _OFFLINE_CACHE]
+        outputs: dict[str, str] = {}
+        pending: list[Document] = []
+        for chunk in chunks:
+            cached = self.cache.get(model, chunk.page_content)
+            if cached is None:
+                if self.require_cache:
+                    raise MissingRstCache(
+                        "RST cache miss in an offline-only run; build the cache with "
+                        "scripts/build_rst_cache.py before running the evaluation"
+                    )
+                pending.append(chunk)
+            else:
+                outputs[chunk.page_content] = cached
         if pending:
-            outs = self.chain.batch([{"chunk": c.page_content} for c in pending])
-            for c, o in zip(pending, outs):
-                _OFFLINE_CACHE[(model, c.page_content)] = o
-        return [
-            self._parse_output(_OFFLINE_CACHE[(model, c.page_content)], c.metadata["chunk_id"])
-            for c in chunks
-        ]
+            raw_outputs = self.chain.batch([{"chunk": chunk.page_content} for chunk in pending])
+            for chunk, raw in zip(pending, raw_outputs):
+                self.cache.put(model, chunk.page_content, raw)
+                outputs[chunk.page_content] = raw
+        return [self._parse_output(outputs[chunk.page_content], chunk.metadata["chunk_id"]) for chunk in chunks]
 
     @staticmethod
     def _parse_output(text: str, chunk_id: int) -> RstTree:

@@ -10,16 +10,17 @@ from .attention import PMDEncoderLayerPVA, PMDEncoderLayerTRA
 
 class AdaptiveStatistics(nn.Module):
     """内部 token 统计与外部最近运行统计的样本级可学习融合。"""
-    def __init__(self, c, d, use_gate=True, use_adain=True):
+    def __init__(self, c, d, use_gate=True, use_adain=True, window=72):
         super().__init__()
         self.use_gate, self.use_adain = use_gate, use_adain
+        self.window = int(window)
         self.external = nn.Sequential(nn.Linear(c*2, d*2), nn.GELU(), nn.Linear(d*2, d*2))
         self.gate = nn.Sequential(nn.Linear(d*4, d), nn.GELU(), nn.Linear(d, d*2), nn.Sigmoid())
 
     def forward(self, z, x):
         mu = z.mean(1, keepdim=True)
         sd = z.std(1, keepdim=True, unbiased=False).clamp_min(1e-5)
-        recent = x[:, -72:]
+        recent = x[:, -self.window:]
         ext = self.external(torch.cat([recent.mean(1), recent.std(1, unbiased=False)], -1))
         em, es = ext.chunk(2, -1)
         em, es = em[:, None], F.softplus(es[:, None])+1e-5
@@ -56,20 +57,27 @@ class DynaForeNet(nn.Module):
         self.energy_type = self.flags.get("energy_type", "wind")
         self.c, self.horizon, self.patch = c, horizon, 16
         d = cfg["d_model"]
+        n_heads = int(cfg.get("n_heads", 4))
+        d_ff = int(cfg.get("d_ff", 4 * d))
+        nsan_window = int(cfg.get("nsan_window", 72))
+        if nsan_window > lookback:
+            # Debug runs may use a shorter history; the production contract is
+            # 72 steps for both the 288-step wind and 96-step PV windows.
+            nsan_window = lookback
         n = lookback//self.patch
         self.n = n
         self.embedding = nn.Linear(self.patch, d)
         self.position = nn.Parameter(torch.randn(1, n, d)*.01)
         self.var_position = nn.Parameter(torch.randn(1, c, 1, d)*.01)
-        self.pva = PMDEncoderLayerPVA(d, 4, dropout=cfg["dropout"])
-        self.tra = nn.ModuleList([PMDEncoderLayerTRA(d, 4, dropout=cfg["dropout"]) for _ in range(cfg["layers"])])
-        self.statistics = AdaptiveStatistics(c, d, self.on("style_gate"), self.on("adain"))
+        self.pva = PMDEncoderLayerPVA(d, n_heads, d_ff=d_ff, dropout=cfg["dropout"])
+        self.tra = nn.ModuleList([PMDEncoderLayerTRA(d, n_heads, d_ff=d_ff, dropout=cfg["dropout"]) for _ in range(cfg["layers"])])
+        self.statistics = AdaptiveStatistics(c, d, self.on("style_gate"), self.on("adain"), window=nsan_window)
         self.spectrum = AdaptiveSpectrum(n, d)
         self.multiscale = nn.ModuleList([nn.Linear(d, d) for _ in range(3)])
         self.scale_fuse = nn.Sequential(nn.Linear(d*3, d), nn.GELU(), nn.LayerNorm(d))
         self.future = nn.Sequential(nn.Linear(f, d), nn.GELU(), nn.Linear(d, d))
         self.horizon_pos = nn.Parameter(torch.randn(1, horizon, d)*.01)
-        self.cross = nn.MultiheadAttention(d, 4, dropout=cfg["dropout"], batch_first=True)
+        self.cross = nn.MultiheadAttention(d, n_heads, dropout=cfg["dropout"], batch_first=True)
         self.stats_proj = nn.Sequential(nn.Linear(4, d), nn.GELU())
         self.head = nn.Sequential(nn.Linear(d*3, d), nn.GELU(), nn.Dropout(cfg["dropout"]), nn.Linear(d, 1))
         self.mechanism = nn.Sequential(nn.Linear(d+7, d), nn.GELU(), nn.Linear(d, 2))
@@ -88,6 +96,17 @@ class DynaForeNet(nn.Module):
 
     def on(self, name):
         return self.flags.get(name, True)
+
+    def _future_index(self, *names):
+        """Resolve a named future channel while accepting legacy checkpoints."""
+        for name in names:
+            if name in self.future_names:
+                return self.future_names.index(name)
+        for suffix in names:
+            for index, name in enumerate(self.future_names):
+                if name.endswith(suffix):
+                    return index
+        raise KeyError(f"future condition is missing {names}; got {self.future_names}")
 
     def history(self, x):
         b = len(x)
@@ -117,7 +136,7 @@ class DynaForeNet(nn.Module):
             z = z+self.scale_fuse(torch.cat(parts, -1))
         return z
 
-    def forward(self, x, future):
+    def forward(self, x, future, return_aux: bool = False):
         if not self.on("nwp"):
             future = torch.zeros_like(future)
         memory = self.history(x)
@@ -136,32 +155,36 @@ class DynaForeNet(nn.Module):
         recent = s[:, None].expand(-1, self.horizon, -1)
         if not self.on("ramp_gate"):
             recent = torch.cat([recent[..., :3], torch.zeros_like(recent[..., 3:])], -1)
+        daylight = None
         if self.energy_type == "pv":
-            # PV-specific correction: use measured future irradiance and an
-            # exact daylight mask.  The final clamp is part of the output
-            # head, so training and inference share the same feasible set.
-            ghi_idx = self.future_names.index("weather__GHI") if "weather__GHI" in self.future_names else 0
-            gti_idx = self.future_names.index("weather__GTI") if "weather__GTI" in self.future_names else 1
+            # PV-specific correction: use future irradiance (NWP or the
+            # explicit measured-future ablation) and an exact daylight mask.
+            # The final clamp is part of the output head, so training and
+            # inference share the same feasible set.
+            ghi_idx = self._future_index("GHI")
+            gti_idx = self._future_index("GTI", "DNI")
             irradiance = torch.maximum(raw_f[..., ghi_idx], raw_f[..., gti_idx]).clamp_min(0.0)
             irradiance_norm = (irradiance / 1000.0).clamp(0.0, 1.0)
             daylight = (irradiance > 20.0).to(y.dtype)
             energy = torch.cat([recent, irradiance_norm[..., None], daylight[..., None], irradiance_norm.square()[..., None]], -1)
             if self.on("guided_correction"):
-                raw, gate = self.pv_mechanism(torch.cat([context, energy], -1)).unbind(-1)
+                residual, gate = self.pv_mechanism(torch.cat([context, energy], -1)).unbind(-1)
                 amplitude = .03 + .07 * daylight + .03 * irradiance_norm
-                y = y + daylight * amplitude * torch.tanh(raw) * torch.sigmoid(gate)
-            return torch.clamp(y, 0.0, 1.0) * daylight
+                y = y + daylight * amplitude * torch.tanh(residual) * torch.sigmoid(gate)
+            out = torch.clamp(y, 0.0, 1.0) * daylight
+            return (out, {"pre_clamp": y, "daylight": daylight}) if return_aux else out
         # Wind-specific guided residual using recent operating state and
-        # measured future wind components.
-        u = self.future_names.index("nwp__pl925__u")
-        v = self.future_names.index("nwp__pl925__v")
+        # future wind components (NWP or the explicit measured-future ablation).
+        u = self._future_index("future__wind_u", "nwp__pl925__u")
+        v = self._future_index("future__wind_v", "nwp__pl925__v")
         wind = torch.sqrt(raw_f[..., u]**2+raw_f[..., v]**2+1e-6)/25
         high = torch.sigmoid((recent[..., 0]-.7)*10) if self.on("high_gate") else torch.zeros_like(y)
         low = torch.sigmoid((.15-recent[..., 0])*10) if self.on("low_gate") else torch.zeros_like(y)
         ramp_state = ramp[:, None].expand_as(y) if self.on("ramp_gate") else torch.zeros_like(y)
         energy = torch.cat([recent, wind[..., None], high[..., None], low[..., None]], -1)
         if self.on("guided_correction"):
-            raw, gate = self.mechanism(torch.cat([context, energy], -1)).unbind(-1)
+            residual, gate = self.mechanism(torch.cat([context, energy], -1)).unbind(-1)
             amplitude = .03+.07*torch.maximum(high, low)+.05*torch.tanh(ramp_state.abs()*5)
-            y = y+amplitude*torch.tanh(raw)*torch.sigmoid(gate)
-        return torch.clamp(y, 0.0, 1.0)
+            y = y+amplitude*torch.tanh(residual)*torch.sigmoid(gate)
+        out = torch.clamp(y, 0.0, 1.0)
+        return (out, {"pre_clamp": y, "daylight": torch.ones_like(y)}) if return_aux else out

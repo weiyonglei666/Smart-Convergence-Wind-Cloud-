@@ -7,6 +7,7 @@ from langchain_core.documents import Document
 from src.generation.disco_rag import DiscoRagGenerator
 from src.planning.planner import Plan, Planner
 from src.rhetorical_graph.graph import GraphBuilder, RhetoricalGraph
+from src.rst_tree.cache import RstCache
 from src.rst_tree.parser import RstParser
 from src.rst_tree.tree import RstTree
 
@@ -26,7 +27,7 @@ class DiscoPipelineResult:
 class CloudDiscoRAGPipeline:
     """Adapted Disco-RAG structure pipeline backed by an API chat model."""
 
-    def __init__(self, index: VectorIndex, llm: ChatCloudLLM, top_k: int = 5, *, use_rst: bool = True, use_graph: bool = True, use_planning: bool = True):
+    def __init__(self, index: VectorIndex, llm: ChatCloudLLM, top_k: int = 5, *, use_rst: bool = True, use_graph: bool = True, use_planning: bool = True, rst_cache: RstCache | None = None, require_rst_cache: bool = False):
         self.index = index
         self.llm = llm
         self.top_k = top_k
@@ -36,7 +37,7 @@ class CloudDiscoRAGPipeline:
         # Intermediate structure generation only needs compact machine-readable
         # outputs; keep the final answer budget on the original LLM.
         stage_llm = ChatCloudLLM(llm._client, llm.model_name, output_language=llm.output_language, max_tokens_override=256)
-        self.rst_parser = RstParser(stage_llm)
+        self.rst_parser = RstParser(stage_llm, cache=rst_cache, require_cache=require_rst_cache)
         self.graph_builder = GraphBuilder(stage_llm)
         self.planner = Planner(stage_llm)
         self.generator = DiscoRagGenerator(llm)

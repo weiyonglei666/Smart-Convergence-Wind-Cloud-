@@ -20,6 +20,17 @@
 
 发布入口默认从第 0 条开始运行全部评测问题（`--start-index 0 --max-items 0`），不使用后 200 条子集。五组统一 top-k=10、temperature=0、最终生成预算=1024 token、英文输出；结构阶段单次预算为256 token。嵌入使用 Qwen3-Embedding-8B、last-token pooling、归一化向量，分块长度256 token、重叠0，通过FAISS归一化内积检索。
 
+知识检索语料只从 `data/corpus` 下的 `.txt` / `.md` 读取；`data/benchmark` 只作为评测问题，不进入检索索引，避免参考答案泄漏。正式运行默认要求 FAISS；`--retriever tfidf` 仅为调试回退。
+
+块内 RST 树默认在知识库构建阶段离线解析并写入 `POWER_RST_CACHE`。构建命令：
+
+```bash
+python scripts/build_rst_cache.py --corpus data/corpus --model models/Qwen3-Embedding-8B \
+  --output "$POWER_FAISS_INDEX/rst_cache.json"
+```
+
+正式评测设置 `POWER_RST_CACHE` 与 `POWER_REQUIRE_RST_CACHE=1`，在线阶段只读取缓存；缺失缓存会直接报错，而不是静默重新解析。这样 ART 的统计口径才与报告一致：包含检索、缓存读取、跨块图、规划和生成，不包含离线 RST 构建与指标计算。
+
 这里的参数是发布版运行配置，不代表已重新完成全量实验，也不保证复现此前聊天中的汇总数值。本仓库不提供未经原始运行记录核验的结果表。
 
 ## 安装
@@ -74,7 +85,7 @@ python scripts/run_power_eval.py \
 
 正式运行前可添加 `--dry-run` 检查问题数量和路径，不调用生成 API。默认五种方法顺序执行；成功且非空的已有答案会跳过，失败或空答案会重试。`Ctrl+C` 中断后使用同一配置、同一输出目录重运行即可。改变模型、参数或知识库时必须换新输出目录，避免混合不同实验。
 
-`--max-items 0` 表示全量，而不是0个样本。可选子集参数仅供调试，不作为默认发布实验。生成耗时包括在线检索、结构解析、规划和生成；当前适配版在线解析RST，不应声称其ART排除了该阶段。
+`--max-items 0` 表示全量，而不是0个样本。可选子集参数仅供调试，不作为默认发布实验。生成耗时包括在线检索、缓存读取、跨块关系图、规划和最终生成；离线 RST 缓存构建不计入 ART。未设置 `POWER_RST_CACHE` 时 pipeline 会在线解析并写回缓存，但正式实验应使用预构建缓存和 `POWER_REQUIRE_RST_CACHE=1`。
 
 ## 计算五项指标
 

@@ -13,6 +13,7 @@ import torch
 from .augmentation import FeatureAwareAugment
 from .model import DynaForeNet
 from .data import load_station_arrays, standardize, split_indices
+from .losses import LossCoefficients, composite_loss
 from .metrics import metrics, real_time_acc
 from .utils import write_json
 
@@ -75,7 +76,17 @@ def train_station(station: str, data_dir: Path, args: argparse.Namespace, run: P
     yn = (y / cap).astype(np.float32)
     stats = {"x_mean": xm, "x_std": xs, "f_mean": fm, "f_std": fs}
     cfg = {"d_model": args.d_model, "layers": args.layers, "lr": args.lr, "dropout": args.dropout,
-           "batch_size": args.batch_size, "future_columns": future_columns, "capacity_mw": cap}
+           "batch_size": args.batch_size, "future_columns": future_columns, "capacity_mw": cap,
+           "n_heads": getattr(args, "n_heads", 4), "d_ff": getattr(args, "d_ff", 128),
+           "nsan_window": getattr(args, "nsan_window", 72)}
+    coefficients = LossCoefficients(
+        step_decay=float(getattr(args, "loss_step_decay", 0.02)),
+        ramp=float(getattr(args, "loss_ramp", 0.05)),
+        consistency=float(getattr(args, "loss_consistency", 0.10)),
+        frequency=float(getattr(args, "loss_frequency", 0.01)),
+        statistics=float(getattr(args, "loss_statistics", 0.01)),
+        mechanism=float(getattr(args, "loss_mechanism", 0.05)),
+    )
     flags = dynafore_flags(variant, kind)
     torch_device = torch.device(device)
     model = DynaForeNet(xn.shape[-1], fn.shape[-1], xn.shape[1], yn.shape[1], stats, cfg, flags).to(torch_device)
@@ -112,17 +123,27 @@ def train_station(station: str, data_dir: Path, args: argparse.Namespace, run: P
             yb = torch.as_tensor(yn[j], device=torch_device)
             xb_train, yb_train, aug_regularizer = apply_training_augmentation(xb, yb, augmenter, variant)
             opt.zero_grad(set_to_none=True)
-            pred = model.training_prediction(xb_train, fb, yb_train) if hasattr(model, "training_prediction") else model(xb_train, fb)
-            err = (pred[:, :16] - yb_train[:, :16]).abs()
-            official = torch.sqrt((err.pow(3).sum(-1) + 1e-10) / (err.sum(-1) + 1e-6)).mean()
-            loss = torch.nn.functional.mse_loss(pred, yb_train) + 0.15 * official + aug_regularizer
+            clean_pred, aux = model(xb, fb, return_aux=True)
+            augmented_pred = None
+            if xb_train is not xb:
+                augmented_pred, _ = model(xb_train, fb, return_aux=True)
+            loss, parts = composite_loss(
+                clean_pred, yb, augmented=augmented_pred, augmented_target=yb_train,
+                aux=aux, energy_type=kind, coefficients=coefficients,
+            )
+            loss = loss + aug_regularizer
+            parts["total"] = float(loss.detach())
             if not torch.isfinite(loss):
                 raise FloatingPointError(f"non-finite loss epoch={epoch}")
-            loss.backward(); torch.nn.utils.clip_grad_norm_(train_parameters, 1.0); opt.step(); losses.append(float(loss.detach()))
+            loss.backward(); torch.nn.utils.clip_grad_norm_(train_parameters, 1.0); opt.step()
+            losses.append(parts)
         val_pred = predict(idx["val"])
         val_score = float(real_time_acc(y[idx["val"]], val_pred, cap, 16).mean())
         scheduler.step(val_score)
-        row = {"epoch": epoch, "train_loss": float(np.mean(losses)), "val_ACC16": val_score, "lr": float(opt.param_groups[0]["lr"])}
+        row = {"epoch": epoch, "train_loss": float(np.mean([item["total"] for item in losses])),
+               "val_ACC16": val_score, "lr": float(opt.param_groups[0]["lr"])}
+        for name in ["task", "official", "ramp", "consistency", "frequency", "statistics", "mechanism"]:
+            row[f"loss_{name}"] = float(np.mean([item[name] for item in losses]))
         log.append(row); pd.DataFrame(log).to_csv(run / "training_log.csv", index=False)
         print(json.dumps({"station": meta["station"], "model": model_name, **row}), flush=True)
         if val_score > best_score + 1e-5:
@@ -136,7 +157,7 @@ def train_station(station: str, data_dir: Path, args: argparse.Namespace, run: P
     if best_state is not None:
         model.load_state_dict(best_state)
     val_pred, test_pred = predict(idx["val"]), predict(idx["test"])
-    extra = {"future_weather_used": True, "future_weather_source": "measured_future", "parameters": params, "seed": seed, "epochs_trained": len(log), "best_epoch": best_epoch, "variant": variant, "auto_da_used": augmenter is not None, "lr_final": float(opt.param_groups[0]["lr"])}
+    extra = {"future_weather_used": True, "future_weather_source": meta["future_weather_source"], "parameters": params, "seed": seed, "epochs_trained": len(log), "best_epoch": best_epoch, "variant": variant, "auto_da_used": augmenter is not None, "lr_final": float(opt.param_groups[0]["lr"])}
     save_run(run, model_name, meta["station"], cap, y[idx["val"]], val_pred, origins[idx["val"]], "val", extra)
     save_run(run, model_name, meta["station"], cap, y[idx["test"]], test_pred, origins[idx["test"]], "test", extra)
     torch.save({"format_version": 1, "model": best_state or model.state_dict(),
@@ -146,4 +167,4 @@ def train_station(station: str, data_dir: Path, args: argparse.Namespace, run: P
                 "augmentation_parameters": sum(p.numel() for p in augmenter.parameters()) if augmenter is not None else 0,
                 "augmenter": best_augment, "auto_da_used": augmenter is not None, "meta": meta}, run / "checkpoint.pt")
     write_json(run / "complete.json", {"station": station, "variant": variant, "best_epoch": best_epoch,
-                                     "epochs_trained": len(log), "future_weather_source": "measured_future"})
+                                     "epochs_trained": len(log), "future_weather_source": meta["future_weather_source"]})

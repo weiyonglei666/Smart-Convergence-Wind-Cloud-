@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     nwp_refresh_hours: str = "2,4,9,14,16,21"
     timezone_name: str = "Asia/Shanghai"
     realtime_interval_seconds: int = 30
+    rag_mode: str = "disco"
+    rst_cache: str = ""
     admin_username: str = "admin"
     admin_password: str = "change-me"
 

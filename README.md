@@ -4,7 +4,7 @@
 
 **代码组成：DynaFore-Net 负责分场站超短期功率预测，Disco-RAG 负责电力知识问答与消融评测，新能源消纳与并网智能调控平台负责数据接入、可视化和辅助决策。** 三个子目录有各自的依赖、配置和运行入口，应分别安装与启动。
 
-本文依据当前目录的 README、依赖文件、命令行入口及平台接口源码整理。整理日期：2026-10-14。本次仅核对源码和文档，未启动真实场站训练、在线模型调用或生产服务。
+本文依据当前目录的 README、依赖文件、命令行入口及平台接口源码整理。整理日期：2026-10-27。本次核对源码与文档一致性，未启动真实场站训练、在线模型调用或生产服务。
 
 ## 1. 项目导航
 
@@ -70,15 +70,15 @@ flowchart LR
 **当前接入边界：**
 
 - 平台通过数据库适配器读取功率与预测记录，当前接口源码未直接导入 `DynaFore-Net` 的训练包。将研究模型用于线上预测，需要补充特征构造、检查点加载、推理调度和结果入库。
-- 平台包含自己的 `backend/rag_core/`，并由 `app/assistant/service.py` 使用其中的知识加载、检索和模型客户端。它不是自动调用旁边的整个 Disco-RAG 实验目录。
-- 当前平台助手使用本地 TF-IDF 检索、实时业务上下文、规则策略与模型生成；独立 Disco-RAG 实验支持 Qwen3-Embedding-8B / FAISS 以及 RST、修辞图和规划消融。两者的检索与推理路径应分别说明。
+- 平台包含自己的 `backend/rag_core/`，并由 `app/assistant/service.py` 使用其中的知识加载、检索、Disco-RAG 结构管线和模型客户端。它不是自动调用旁边的整个 Disco-RAG 实验目录。
+- 当前平台助手使用本地 TF-IDF 检索、`RAG_MODE=disco` 时的块内 RST/跨块修辞图/话语规划、实时业务上下文、规则策略与模型生成；独立 Disco-RAG 实验支持 Qwen3-Embedding-8B / FAISS 以及 RST、修辞图和规划消融。平台知识语料与 PowerGridQA 评测集分开存放。
 - 平台存在未配置模型密钥或模型调用失败时的规则兜底。能返回建议，不等于完整模型推理链路已正常运行。
 
 ## 3. DynaFore-Net：超短期功率预测
 
 ### 3.1 功能与实现位置
 
-模型面向风电、光伏场站独立训练，默认输入过去 **288 个 15 分钟点，即 72 小时**，预测未来 **16 个点，即 4 小时**。
+模型面向风电、光伏场站独立训练，默认风电场站输入过去 **288 个 15 分钟点，即 72 小时**，光伏场站输入过去 **96 个点，即 24 小时**，预测未来 **16 个点，即 4 小时**。历史/未来特征维度固定为 17/18。
 
 | 文件 | 作用 |
 | --- | --- |
@@ -90,6 +90,8 @@ flowchart LR
 | `src/dynafore_net/evaluation.py` | 检查点加载与测试评估 |
 | `src/dynafore_net/metrics.py` | 预测误差和辅助指标 |
 | `src/dynafore_net/cli.py` | `prepare`、`train`、`run`、`evaluate`、`summarize` 入口 |
+| `src/dynafore_net/nwp.py` | NWP 读取、UTC→UTC+8、起报时间约束与 15 分钟插值 |
+| `src/dynafore_net/losses.py` | 文档所述组合损失（近端权重、爬坡、一致性、频域/统计、机理） |
 
 保留的模型组件包括 PMD-PVA-TRA、NSAN、频谱门控、多尺度融合、未来条件交叉注意力和机理引导修正。AutoDA 与预测器联合优化，验证和测试阶段不使用训练增强。
 
@@ -104,9 +106,9 @@ zdata_<station>_pv_power_real_15min.csv
 zdata_<station>_qxz_15min.csv
 ```
 
-功率文件使用 `DATE_TIME`、`ACTIVE_POWER`；气象字段按风电或光伏类型组织。容量须由场站元数据或 `--capacity-json` 提供，不从测试集功率反推。详细字段、单位和缺失值规则见 [数据格式说明](DynaFore-Net/DATA_AVAILABILITY.md)。
+功率文件使用 `DATE_TIME`、`ACTIVE_POWER`；气象字段按风电或光伏类型组织，固定选择 10 个气象通道。容量须由场站元数据或 `--capacity-json` 提供，不从测试集功率反推。详细字段、单位和缺失值规则见 [数据格式说明](DynaFore-Net/DATA_AVAILABILITY.md)。
 
-当前整理版的未来气象输入是预测区间对应的**实测气象序列**，不能将该实验条件下的精度直接视作在线 NWP 预报条件下的精度。部分继承通道名称带有 `nwp`，不代表当前数据管线实际读取 NWP。
+未来条件默认读取 NWP：`prepare` / `run` 使用 `--nwp-dir`，按场站放置 `zdata_<station>_nwp.csv`，并执行 UTC→UTC+8、`ISSUE_TIME <= 预测起点` 与 3 h→15 min 线性插值。`--future-source measured` 是显式消融设置，使用预测区间实测气象；该模式下 `meta.json` 标记为 `measured_future`，不能把实验结果描述为在线 NWP 精度。
 
 ### 3.3 安装与运行
 
@@ -119,8 +121,8 @@ python -m venv .venv
 python -m pip install -e .
 python -m dynafore_net --help
 
-# 准备数据
-dynafore prepare --raw-dir "D:\private_power_csvs" --output outputs
+# 准备数据（NWP 为默认未来条件）
+dynafore prepare --raw-dir "D:\private_power_csvs" --nwp-dir "D:\private_nwp" --output outputs
 
 # 分场站训练；GPU 须显式指定，如 cuda:0
 dynafore train --output outputs --config configs/default.json --device cpu
@@ -135,7 +137,7 @@ Python 要求 3.10+。依赖包括 NumPy、Pandas 和 PyTorch；使用 GPU 时�
 完整模型和四组消融：
 
 ```powershell
-dynafore run --raw-dir "D:\private_power_csvs" --output outputs_ablations --variants full noPMD-PVA-TRA noNSAN noAutoDA "noguided correction" --device cuda:0
+dynafore run --raw-dir "D:\private_power_csvs" --nwp-dir "D:\private_nwp" --output outputs_ablations --variants full noPMD-PVA-TRA noNSAN noAutoDA "noguided correction" --device cuda:0
 ```
 
 默认最大 20 epoch，验证 ACC@16 决定最佳检查点和早停；有效起点按时间顺序划分为 70% / 15% / 15%，并清除目标区间跨集合边界的窗口。标准化统计量仅由训练窗口拟合。已有缓存或模型默认不覆盖，重跑建议使用新的输出目录。
@@ -184,7 +186,7 @@ ACC 按每个预测起点的误差计算后求均值，**不是 `100 × (1 - nRM
 - 嵌入模型：本地准备 Qwen3-Embedding-8B，模型路径通过环境变量设置。
 - 生成模型：使用外部 OpenAI 兼容接口；此目录不负责启动模型服务。
 
-知识库和测试参考答案分开存放。题目文件名与行号参与构造样本 ID，续跑期间不要重排评测文件。详见 [数据说明](Disco-RAG-OpenSource/data/README.md)。
+知识库和测试参考答案分开存放：知识语料是 `data/corpus` 下的 `.txt` / `.md`，评测 JSONL 放在 `data/benchmark`，评测答案不会进入检索索引。题号和行号参与构造样本 ID，续跑期间不要重排评测文件。详见 [数据说明](Disco-RAG-OpenSource/data/README.md)。
 
 ### 4.3 安装与运行
 
@@ -200,7 +202,7 @@ python -m pip install -r requirements-dev.txt
 
 # 将以下占位值替换为自己的配置；密钥不要写入源码
 $env:POWER_LLM_API_KEY = "REPLACE_WITH_YOUR_KEY"
-$env:POWER_LLM_BASE_URL = "http://127.0.0.1:8000/v1"
+$env:POWER_LLM_BASE_URL = "http://127.0.0.1:8002/v1"
 $env:POWER_LLM_MODEL = "实际生成服务返回的模型ID"
 $env:POWER_CORPUS_ROOT = "data/corpus"
 $env:ELECBENCH_ROOT = "data/benchmark"
@@ -211,16 +213,19 @@ $env:POWER_LLM_TEMPERATURE = "0"
 $env:POWER_LLM_MAX_TOKENS = "1024"
 $env:POWER_LLM_TIMEOUT = "300"
 $env:POWER_EMBEDDING_BATCH_SIZE = "2"
+$env:POWER_RST_CACHE = "indexes/power_public_qwen3e8b_faiss/rst_cache.json"
+$env:POWER_REQUIRE_RST_CACHE = "1"
 
-# 构建索引
+# 构建索引与离线 RST 缓存
 python scripts/build_power_faiss.py --corpus "$env:POWER_CORPUS_ROOT" --model "$env:POWER_EMBEDDING_MODEL" --output "$env:POWER_FAISS_INDEX" --chunk-size 256 --batch-size 2
+python scripts/build_rst_cache.py --corpus "$env:POWER_CORPUS_ROOT" --model "$env:POWER_EMBEDDING_MODEL" --output "$env:POWER_RST_CACHE"
 
 # 先核对数据与路径，再运行全量问答
 python scripts/run_power_eval.py --dry-run
 python scripts/run_power_eval.py --methods disco_full without_rst without_graph without_planning standard_rag --start-index 0 --max-items 0 --output-dir results/full_en
 ```
 
-`8000` 是上面示例为外部模型服务选择的端口，须换成实际地址；代码配置的默认地址是 `8001/v1`。平台后端也使用 `8001`，因此同机运行时必须区分两种服务。平台的 FastAPI 业务接口不能直接当作生成模型的 `/v1` 接口。
+生成服务使用独立端口 `8002`；平台后端占用 `8001`，同机运行时必须区分两种服务。平台的 FastAPI 业务接口不能直接当作生成模型的 `/v1` 接口。
 
 本项目通过进程环境变量读取配置，PowerShell 中仅复制 `.env.example` 为 `.env` 不会自动加载变量。Linux 的 `.env` 加载方式见子项目 README。示例中的 `Qwen3.8-27B` 是部署名称，实际请求 ID 以所连接服务为准。
 
@@ -236,7 +241,7 @@ python scripts/evaluate_saved_answers.py --stage summac --summac-mode entailment
 
 正式默认参数为 top-k=10、temperature=0、最终生成预算 1024 token、英文输出，结构阶段单次预算 256 token。嵌入采用 last-token pooling 与归一化向量，256 token 分块、不重叠。
 
-`--max-items 0` 表示全量。已有成功且非空答案可跳过，失败或空答案重试；修改模型、知识库或参数时更换输出目录。ART 包含在线检索、结构解析、规划和生成，指标计算不计入 ART。SummaC 的 `entailment` 与 `signed` 是不同口径，应显式指定并记录。
+`--max-items 0` 表示全量。已有成功且非空答案可跳过，失败或空答案重试；修改模型、知识库或参数时更换输出目录。ART 包含在线检索、RST 缓存读取、跨块图、规划和生成，离线 RST 缓存构建与指标计算不计入 ART。SummaC 的 `entailment` 与 `signed` 是不同口径，应显式指定并记录。
 
 ## 5. 新能源消纳与并网智能调控平台
 
@@ -308,7 +313,8 @@ npm run dev
 | 预测数据表 | `FORECAST_TABLE_PREFIX` |
 | NWP | `NWP_SSH_HOST`、`NWP_SSH_PORT`、`NWP_SSH_USER`、`NWP_REMOTE_DIR`、`NWP_REFRESH_HOURS` |
 | 运行参数 | `TIMEZONE_NAME`、`REALTIME_INTERVAL_SECONDS` |
-| 生成模型 | `POWER_LLM_API_KEY`、`POWER_LLM_BASE_URL`、`POWER_LLM_MODEL`；另保留兼容的 DeepSeek 变量 |
+| 生成模型 | `POWER_LLM_API_KEY`、`POWER_LLM_BASE_URL`（默认 `8002/v1`）、`POWER_LLM_MODEL`、`POWER_RAG_TOP_K=10`、`POWER_LLM_MAX_TOKENS=1024`；另保留兼容的 DeepSeek 变量 |
+| 知识检索 | `RAG_MODE=disco`、`RST_CACHE`；知识语料放 `backend/data/knowledge/` |
 | 管理账号 | `ADMIN_USERNAME`、`ADMIN_PASSWORD` |
 
 NWP 默认刷新时刻来自源码配置 `2,4,9,14,16,21`，时区为 `Asia/Shanghai`。实测气象按 UTC+8 使用，NWP 原始 UTC 转换后对齐，保留起报和有效时间。

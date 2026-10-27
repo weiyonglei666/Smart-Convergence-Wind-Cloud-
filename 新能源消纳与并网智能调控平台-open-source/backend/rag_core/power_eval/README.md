@@ -1,27 +1,21 @@
-# Power RAG Evaluation
+# Power RAG Core (platform)
 
-本实验将 PowerGridQA 作为电力知识库，将 ElecBench 作为独立测试集，对比 Direct LLM、Standard RAG、GraphRAG、Retrieve-and-Plan、Plan-and-Retrieve 和 Disco-RAG。
+平台后端内置的 RAG 核心，供 `app/assistant/service.py` 使用。它与根目录的独立 `Disco-RAG-OpenSource` 实验目录职责不同：
 
-Disco-RAG 方法调用仓库中的官方组件：`RstParser` 生成每个检索块的 RST 树，`GraphBuilder` 生成跨块修辞图，`Planner` 生成 discourse-aware plan，`DiscoRagGenerator` 根据三类结构生成最终答案。云端模型通过 `ChatCloudLLM` 适配器接入，不依赖本地 vLLM。
+- 知识库：`backend/data/knowledge/` 下的 `.txt` / `.md`；`backend/data/powergridqa/` 只放评测集，不参与检索。
+- 检索：本地 TF-IDF 向量索引；正式离线实验仍使用独立目录中的 Qwen3-Embedding-8B / FAISS。
+- 结构：`CloudDiscoRAGPipeline` 调用 `RstParser`、`GraphBuilder`、`Planner`，把块内 RST、跨块修辞图和话语规划写入最终报告提示词；`RAG_MODE=light` 可退回纯片段检索。
+- 缓存：`RST_CACHE` 指向 `RstCache` 文件；存在时优先读取，缺失时在线解析并写回（正式评测应预构建并设置 `POWER_REQUIRE_RST_CACHE=1`）。
 
-在 `Disco-RAG` 目录执行：
-
-```powershell
-$env:DEEPSEEK_API_KEY="你的新Key"
-python scripts/run_power_eval.py --dry-run --methods direct standard_rag graphrag retrieve_plan plan_retrieve disco_rag
-python scripts/run_power_eval.py --methods direct standard_rag graphrag retrieve_plan plan_retrieve disco_rag
-```
-
-密钥只从环境变量读取，不写入代码、配置或结果。评测结果按方法写入 `results/power_eval/*.jsonl`，支持中断后继续运行；Disco-RAG 结果额外保存 RST 树、修辞图和 discourse plan，便于审计和消融实验。
-
-## 切换到本地 OpenAI 兼容服务
-
-不需要修改代码，在当前 PowerShell 会话中设置：
+## 配置
 
 ```powershell
 $env:POWER_LLM_API_KEY="本地服务的Key"
-$env:POWER_LLM_BASE_URL="http://192.168.1.130:8001/v1"
+$env:POWER_LLM_BASE_URL="http://127.0.0.1:8002/v1"
 $env:POWER_LLM_MODEL="Qwen3.8-27B"
+$env:POWER_RAG_TOP_K="10"
+$env:RAG_MODE="disco"
+$env:RST_CACHE="data/knowledge/.rst_cache.json"
 ```
 
-未设置 `POWER_LLM_*` 时，程序继续使用原有的 DeepSeek 配置。两套配置互不覆盖实验结果。
+生成服务不要占用平台 FastAPI 的 `8001` 端口。密钥只从环境变量读取，不写入代码或配置。

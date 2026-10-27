@@ -9,6 +9,7 @@ from app.api.routes import get_repository
 from app.assistant.service import _get_index, answer_question
 
 router = APIRouter(prefix="/api/assistant")
+AGENTS = ["问题理解智能体", "实时数据智能体", "预测分析智能体", "知识检索智能体", "报告生成智能体"]
 
 
 class AssistantRequest(BaseModel):
@@ -32,9 +33,15 @@ def assistant_status():
         _, documents = _get_index()
         document_count = len(documents)
     except Exception as exc:
-        return {"ready": False, "document_count": 0, "reason": str(exc)}
+        return {"ready": False, "document_count": 0, "reason": str(exc), "agents": AGENTS}
     from app.rag_config import model_configured
-    return {"ready": True, "document_count": document_count, "model_configured": model_configured(), "agents": ["问题理解智能体", "实时数据智能体", "知识检索智能体", "报告生成智能体"]}
+    return {
+        "ready": True,
+        "document_count": document_count,
+        "knowledge_configured": document_count > 0,
+        "model_configured": model_configured(),
+        "agents": AGENTS,
+    }
 
 
 @router.post("/chat")

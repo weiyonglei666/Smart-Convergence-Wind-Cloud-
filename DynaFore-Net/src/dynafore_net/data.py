@@ -10,9 +10,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .nwp import build_nwp_future, find_station_nwp
 from .utils import write_json
 
 WEATHER_META = {"OBJ_ID", "DATE_TIME", "CREATE_TIME", "FARM_ID"}
+
+# The report fixes the input contract at 17 historical and 18 future features.
+HISTORY_FEATURES = 17
+FUTURE_FEATURES = 18
+WEATHER_FEATURES = 10
 
 def discover_power_files(raw_dir: Path) -> dict[str, tuple[str, Path]]:
     found: dict[str, tuple[str, Path]] = {}
@@ -88,9 +94,25 @@ def choose_weather_columns(weather: pd.DataFrame, kind: str) -> list[str]:
     for c in fallback:
         if c not in chosen:
             chosen.append(c)
-        if len(chosen) >= (10 if kind == "wind" else 10):
+        if len(chosen) >= WEATHER_FEATURES:
             break
-    return chosen[:10]
+    if len(chosen) < WEATHER_FEATURES:
+        raise ValueError(
+            f"{kind} weather table exposes {len(chosen)} usable variables; "
+            f"the documented model contract requires {WEATHER_FEATURES}"
+        )
+    if kind == "wind" and not (any(c.startswith("WS") for c in chosen) and any(c.startswith("WD") for c in chosen)):
+        raise ValueError("wind weather table must provide wind speed (WS*) and direction (WD*)")
+    if kind == "pv" and not (("GHI" in chosen) and ({"GTI", "DNI"} & set(chosen))):
+        raise ValueError("PV weather table must provide GHI and at least one of GTI/DNI")
+    # Keep the physically required channels even if a provider exposes more
+    # than ten WS* columns before the first WD* column.
+    if kind == "wind":
+        required = [next(c for c in chosen if c.startswith("WS")), next(c for c in chosen if c.startswith("WD"))]
+    else:
+        required = ["GHI", next(c for c in chosen if c in {"GTI", "DNI"})]
+    ordered = required + [c for c in chosen if c not in required]
+    return ordered[:WEATHER_FEATURES]
 
 
 def cyclical_frame(index: pd.DatetimeIndex) -> pd.DataFrame:
@@ -141,8 +163,9 @@ def load_station_raw(station: str, kind: str, power_path: Path, raw_dir: Path, c
 def future_weather_frame(base: pd.DataFrame, weather_cols: list[str], kind: str) -> tuple[np.ndarray, list[str]]:
     raw = base[[f"weather__{c}" for c in weather_cols]].to_numpy(dtype=np.float32)
     names = [f"weather__{c}" for c in weather_cols]
-    # DynaFore's wind-state branch expects two wind components.  They are
-    # derived from the future measured weather only for the DynaFore job.
+    # The measured-future ablation reuses observed tower/qxz values.  Wind
+    # components are derived from the measured speed/direction; this is *not*
+    # NWP and is reported separately in metadata.
     ws_col = next((f"weather__{c}" for c in weather_cols if c.startswith("WS")), None)
     wd_col = next((f"weather__{c}" for c in weather_cols if c.startswith("WD")), None)
     if kind == "wind" and ws_col:
@@ -157,7 +180,9 @@ def future_weather_frame(base: pd.DataFrame, weather_cols: list[str], kind: str)
         u = v = np.zeros(len(base), dtype=np.float32)
     cal = base[["sin_day", "cos_day", "sin_week", "cos_week", "sin_year", "cos_year"]].to_numpy(dtype=np.float32)
     fut = np.column_stack([u, v, raw, cal]).astype(np.float32)
-    fut_names = ["nwp__pl925__u", "nwp__pl925__v"] + names + [f"future__{c}" for c in ["sin_day", "cos_day", "sin_week", "cos_week", "sin_year", "cos_year"]]
+    fut_names = ["future__wind_u", "future__wind_v"] + names + [f"future__{c}" for c in ["sin_day", "cos_day", "sin_week", "cos_week", "sin_year", "cos_year"]]
+    if fut.shape[-1] != FUTURE_FEATURES:
+        raise AssertionError(f"future-condition contract must be {FUTURE_FEATURES} features")
     return fut, fut_names
 
 
@@ -171,20 +196,43 @@ def prepare_station(station: str, kind: str, power_path: Path, out: Path, args: 
     capacities = json.loads(args.capacity_json.read_text(encoding="utf-8")) if args.capacity_json else None
     base, wcols, cap, weather_file = load_station_raw(station, kind, power_path, args.raw_dir, capacities)
     xraw = base.to_numpy(dtype=np.float32)
-    fraw_full, fnames = future_weather_frame(base, wcols, kind)
+    if xraw.shape[1] != HISTORY_FEATURES:
+        raise AssertionError(
+            f"history-condition contract must be {HISTORY_FEATURES} features, got {xraw.shape[1]}"
+        )
     yraw = xraw[:, 0].copy()
-    L, H = args.lookback, args.pred_len
-    invalid_x = (~np.isfinite(xraw)).any(axis=1).astype(np.int64)
-    invalid_f = (~np.isfinite(fraw_full)).any(axis=1).astype(np.int64)
-    invalid_y = (~np.isfinite(yraw)).astype(np.int64)
-    cx, cf, cy = np.r_[0, np.cumsum(invalid_x)], np.r_[0, np.cumsum(invalid_f)], np.r_[0, np.cumsum(invalid_y)]
+    future_source = getattr(args, "future_source", "nwp")
+    if future_source not in {"nwp", "measured"}:
+        raise ValueError("future_source must be 'nwp' or 'measured'")
+    lookback = int(getattr(args, "lookback_pv", 96) if kind == "pv" else args.lookback)
+    L, H = lookback, args.pred_len
     positions = np.arange(L, len(base) - H + 1, dtype=np.int64)
-    good = (cx[positions] - cx[positions - L] == 0) & (cf[positions + H] - cf[positions] == 0) & (cy[positions + H] - cy[positions] == 0)
+    if future_source == "nwp":
+        nwp_path = find_station_nwp(getattr(args, "nwp_dir", None), station)
+        future, fnames, future_file = build_nwp_future(
+            base.index, positions, H, kind, nwp_path,
+            base[["sin_day", "cos_day", "sin_week", "cos_week", "sin_year", "cos_year"]].to_numpy(dtype=np.float32),
+        )
+    else:
+        fraw_full, fnames = future_weather_frame(base, wcols, kind)
+        future = np.stack([fraw_full[p:p + H] for p in positions]).astype(np.float32)
+        future_file = str(weather_file) if weather_file else None
+    if future.shape[1:] != (H, FUTURE_FEATURES):
+        raise AssertionError(
+            f"future-condition contract must be ({H}, {FUTURE_FEATURES}), got {future.shape[1:]}"
+        )
+    valid_x = np.isfinite(xraw).all(axis=1)
+    valid_y = np.isfinite(yraw)
+    valid_f = np.isfinite(future).all(axis=(1, 2))
+    bad_x = (~valid_x).astype(np.int64)
+    bad_y = (~valid_y).astype(np.int64)
+    cx, cy = np.r_[0, np.cumsum(bad_x)], np.r_[0, np.cumsum(bad_y)]
+    good = (cx[positions] - cx[positions - L] == 0) & (cy[positions + H] - cy[positions] == 0) & valid_f
     positions = positions[good]
     if len(positions) < 100:
         raise ValueError(f"{station} 有效窗口不足: {len(positions)}")
     x = np.stack([xraw[p - L:p] for p in positions]).astype(np.float32)
-    f = np.stack([fraw_full[p:p + H] for p in positions]).astype(np.float32)
+    f = future[good].astype(np.float32)
     y = np.stack([yraw[p:p + H] for p in positions]).astype(np.float32)
     origins = pd.DatetimeIndex(base.index[positions], name="origin_time")
     n = len(origins)
@@ -209,11 +257,16 @@ def prepare_station(station: str, kind: str, power_path: Path, out: Path, args: 
     meta = {
         "station": station, "kind": kind, "capacity_mw": cap, "lookback": L, "pred_len": H,
         "weather_file": str(weather_file) if weather_file else None,
+        "future_weather_file": future_file,
         "weather_columns": wcols, "x_columns": list(base.columns),
         "future_columns": fnames, "n_total_before_subsample": int(n),
         "counts": {s: int((split == s).sum()) for s in ["train", "val", "test", "purged"]},
-        "future_weather_source": "measured_future",
-        "future_weather_policy": "future measured tower/qxz weather; not operational NWP",
+        "future_weather_source": "nwp" if future_source == "nwp" else "measured_future",
+        "future_weather_policy": (
+            "ECMWF-style NWP with UTC+8 alignment, issue_time <= origin and 15-minute interpolation"
+            if future_source == "nwp" else
+            "future measured tower/qxz weather; an explicit ablation, not operational NWP"
+        ),
         "raw_power_file": str(power_path),
     }
     write_json(station_dir / "meta.json", meta)
@@ -223,7 +276,13 @@ def prepare_station(station: str, kind: str, power_path: Path, out: Path, args: 
 def load_station_arrays(data_dir: Path, station: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
     d = data_dir / station
     meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
-    return np.load(d / "x.npy", mmap_mode="r"), np.load(d / "future_weather.npy", mmap_mode="r"), np.load(d / "y.npy", mmap_mode="r"), np.load(d / "origins.npy"), np.load(d / "split.npy"), meta
+    # Do not return file-backed memmaps.  They keep *.npy handles open on
+    # Windows, so a completed run cannot be moved or deleted and repeated
+    # evaluation sees stale files.
+    return (
+        np.load(d / "x.npy"), np.load(d / "future_weather.npy"), np.load(d / "y.npy"),
+        np.load(d / "origins.npy"), np.load(d / "split.npy"), meta,
+    )
 
 
 def standardize(x: np.ndarray, train_idx: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

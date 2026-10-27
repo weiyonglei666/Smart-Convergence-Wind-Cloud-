@@ -24,7 +24,7 @@ def evaluate_run(data_dir: Path, run: Path, device: str = "cpu", batch_size: int
     model.load_state_dict(checkpoint["model"])
     model.eval()
     extra = {key: checkpoint[key] for key in ["variant", "auto_da_used", "best_epoch", "epochs_trained", "parameters", "seed"]}
-    extra.update({"future_weather_used": True, "future_weather_source": "measured_future"})
+    extra.update({"future_weather_used": True, "future_weather_source": meta["future_weather_source"]})
     for name, indices in split_indices(split).items():
         if name == "train":
             continue

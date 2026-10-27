@@ -7,10 +7,10 @@
 ## 功能模块
 
 - **功率监测大屏**：场站地图、实时功率、理论/可利用功率、限电状态、历史实测与未来 4 小时超短期预测。
-- **气象观测大屏**：测风塔与辐照度实测、24 小时趋势、NWP 最新起报、UTC 到 UTC+8 对齐及场站最近网格裁剪。
-- **消纳分析大屏**：实际/理论/可利用功率对比、场站消纳与弃电指标、MAE、RMSE、ACC 和误差曲线。
-- **智能调控中心**：语义理解、实时数据读取、知识检索、策略评估和报告生成；建议保留人工确认，不直接替代调度指令。
-- **后台管理**：场站启停、数据源状态、服务器连接元数据与审计记录。
+- **气象观测大屏**：测风塔与辐照度实测、24 小时趋势、NWP 最新起报、UTC 到 UTC+8 对齐、场站经纬度双线性插值与 15 分钟时间插值。
+- **消纳分析大屏**：实际/理论/可利用功率对比、场站消纳与弃电指标（`弃电 = max(0, 可利用 - 实际)`，`消纳率 = 实际 / 可利用`）、MAE、RMSE、ACC 和误差曲线。
+- **智能调控中心**：问题理解、实时数据、预测分析、知识检索、报告生成五个智能体；知识检索智能体在 `RAG_MODE=disco` 时使用块内 RST、跨块修辞图和话语规划组织证据，建议保留人工确认，不直接替代调度指令。
+- **后台管理**：场站启停、数据源连接检查、服务器连接配置与审计记录。
 
 ## 技术架构
 
@@ -19,7 +19,7 @@
 | 前端 | Vue 3、TypeScript、Vite、ECharts、Element Plus、Pinia |
 | 后端 | FastAPI、Pydantic Settings、PyMySQL、Pandas |
 | 数据 | MySQL 业务库、SSH/NWP 文件源、本地知识库（均由部署方配置） |
-| 智能分析 | RAG、知识图谱、多智能体编排、可配置的 OpenAI 兼容模型接口 |
+| 智能分析 | RAG、块内 RST 与跨块修辞图、多智能体编排、可配置的 OpenAI 兼容模型接口 |
 
 ## 目录结构
 
@@ -28,7 +28,8 @@
 ├─ backend/                 # FastAPI 服务、领域模型、数据适配器和测试
 │  ├─ app/
 │  ├─ rag_core/             # RAG 与评测核心代码（不含语料/权重）
-│  ├─ data/powergridqa/     # 私有知识库放置目录
+│  ├─ data/knowledge/       # 平台知识库放置目录（.txt/.md）
+│  ├─ data/powergridqa/     # 评测集放置目录（不参与检索）
 │  └─ tests/
 ├─ frontend/                # Vue 3 可视化大屏与管理端
 ├─ scripts/                 # 最新 NWP 选择、下载与场站裁剪脚本
@@ -78,6 +79,15 @@ npm run dev
 ```powershell
 python scripts/extract_latest_nwp.py --remote nwp-host --remote-dir /path/to/nwp/48h
 ```
+
+提取结果同时保留 `valid_time_utc` 和 `valid_time_cn`，按场站经纬度双线性插值，并把原生预报步长线性插值为 15 分钟。
+
+### 5. 知识库与模型服务
+
+- 知识语料放在 `backend/data/knowledge/`（UTF-8 `.txt` / `.md`，可含子目录）；PowerGridQA 评测 JSONL 放在 `backend/data/powergridqa/`，不会被检索。
+- 生成服务使用 OpenAI 兼容接口，默认 `http://127.0.0.1:8002/v1`，不要占用平台后端 `8001` 端口。
+- `RAG_MODE=disco` 时，知识检索智能体读取 `RST_CACHE` 中的块内 RST，并在线构建跨块修辞图和话语规划；`RAG_MODE=light` 退回纯片段检索。
+- `POWER_RAG_TOP_K=10`、`POWER_LLM_MAX_TOKENS=1024`、`POWER_LLM_TEMPERATURE=0` 与报告参数一致。
 
 ## 数据与知识库
 

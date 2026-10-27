@@ -15,7 +15,7 @@ ADMIN_STATE: dict[str, bool] = {}
 AUDIT_EVENTS: list[AuditEvent] = []
 
 
-def record_station_change(station_id: str, before: dict, after: dict) -> AuditEvent:
-    event = AuditEvent('station.update', station_id, before, after, datetime.now(timezone.utc))
+def record_station_change(station_id: str, before: dict, after: dict, action: str = 'station.update') -> AuditEvent:
+    event = AuditEvent(action, station_id, before, after, datetime.now(timezone.utc))
     AUDIT_EVENTS.append(event)
     return event

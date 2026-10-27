@@ -18,7 +18,7 @@ class ModelTests(unittest.TestCase):
                       "f_mean": np.zeros(18, np.float32), "f_std": np.ones(18, np.float32)}
         self.stats["x_mean"][0] = 50.0
         self.cfg = {"d_model": 32, "layers": 1, "dropout": .1, "capacity_mw": 100.0,
-                    "future_columns": ["nwp__pl925__u", "nwp__pl925__v", "weather__GHI", "weather__GTI"] + [f"f{i}" for i in range(14)]}
+                    "future_columns": ["future__wind_u", "future__wind_v", "weather__GHI", "weather__GTI"] + [f"f{i}" for i in range(14)]}
         self.x = torch.randn(2, 288, 17)
         self.future = torch.randn(2, 16, 18)
 
@@ -68,6 +68,22 @@ class ModelTests(unittest.TestCase):
             self.model_class(17, 18, 288, 12, self.stats, self.cfg)
         with self.assertRaises(ValueError):
             self.model_class(17, 18, 290, 16, self.stats, self.cfg)
+
+    def test_composite_loss_reports_every_documented_term(self):
+        from dynafore_net.losses import composite_loss
+        target = torch.full((2, 16), .4)
+        clean = target.clone()
+        augmented = target + .05
+        loss, parts = composite_loss(clean, target, augmented=augmented, augmented_target=target,
+                                     energy_type="wind")
+        self.assertTrue(torch.isfinite(loss))
+        for name in ["task", "official", "ramp", "consistency", "frequency", "statistics", "mechanism"]:
+            self.assertIn(name, parts)
+        self.assertGreater(parts["consistency"], 0)
+        raw = {"pre_clamp": torch.full((2, 16), 1.2), "daylight": torch.ones(2, 16)}
+        clean_loss, _ = composite_loss(clean, target, energy_type="wind")
+        penalised, _ = composite_loss(clean, target, aux=raw, energy_type="wind")
+        self.assertGreater(float(penalised), float(clean_loss))
 
 
 if __name__ == "__main__":

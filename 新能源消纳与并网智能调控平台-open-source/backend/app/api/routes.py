@@ -1,4 +1,4 @@
-from dataclasses import asdict
+﻿from dataclasses import asdict
 import asyncio
 import json
 import time
@@ -14,7 +14,8 @@ from fastapi.responses import StreamingResponse
 from app.adapters.stations import StationRepository
 from app.api.schemas import PowerPointResponse, SnapshotResponse, StationResponse
 from app.db import mysql_connection
-from app.services.time_alignment import classify_freshness
+from app.services.metrics import calculate_consumption
+from app.services.time_alignment import CN_TZ, classify_freshness
 
 router = APIRouter(prefix="/api")
 
@@ -142,18 +143,28 @@ def consumption_overview(repo: Repo):
     actual = sum((item.active_power_mw or 0) for item in snapshots)
     theory = sum((item.theory_power_mw or 0) for item in snapshots)
     available = sum((item.available_power_mw or 0) for item in snapshots)
-    field_complete = [item for item in snapshots if item.active_power_mw is not None and item.theory_power_mw is not None and item.available_power_mw is not None]
-    # The two dashboard water-balls are complementary parts of one balance:
+    per_station = {
+        item.station_id: calculate_consumption(
+            item.active_power_mw, item.theory_power_mw, item.available_power_mw, item.limit_mark,
+        )
+        for item in snapshots
+    }
+    # The documented consumption balance only needs actual and available
+    # power.  Theory power is optional context and must not make a station
+    # "incomplete" when the available-power fields are present.
+    field_complete = [item for item in snapshots if per_station[item.station_id].utilization_rate is not None]
     # consumed (actual) + curtailed (available - actual) = available.  They
-    # therefore must use the same available-power denominator.  Theoretical
-    # power remains available for quality checks and the analysis curves, but
-    # must not be mixed into this pair of percentages.
-    comparable = [item for item in field_complete if item.active_power_mw >= 0 and item.theory_power_mw > 0 and item.available_power_mw > 0 and item.active_power_mw <= item.theory_power_mw and item.active_power_mw <= item.available_power_mw]
+    # therefore use the same available-power denominator; theoretical power
+    # remains available for quality checks and the analysis curves, but must
+    # not be mixed into this pair of percentages.
+    comparable = [
+        item for item in field_complete
+        if item.active_power_mw >= 0 and item.available_power_mw > 0 and item.active_power_mw <= item.available_power_mw
+    ]
     comparable_actual = sum(item.active_power_mw for item in comparable)
-    comparable_theory = sum(item.theory_power_mw for item in comparable)
     comparable_available = sum(item.available_power_mw for item in comparable)
-    curtailed = max(0.0, comparable_available - comparable_actual)
-    quality_ok = comparable_theory > 0 and comparable_available > 0
+    curtailed = sum(per_station[item.station_id].curtailed_mw for item in comparable)
+    quality_ok = comparable_available > 0
     missing = [item.station_id for item in snapshots if item not in field_complete]
     anomalies = [item.station_id for item in field_complete if item not in comparable]
     _consumption_cache = {
@@ -170,8 +181,8 @@ def consumption_overview(repo: Repo):
             "active_power_mw": item.active_power_mw,
             "theory_power_mw": item.theory_power_mw,
             "available_power_mw": item.available_power_mw,
-            "consumption_rate": round(item.active_power_mw / item.available_power_mw * 100, 2) if item in comparable else None,
-            "curtailment_rate": round(max(0, item.available_power_mw - item.active_power_mw) / item.available_power_mw * 100, 2) if item in comparable and item.available_power_mw > 0 else None,
+            "consumption_rate": round(per_station[item.station_id].utilization_rate * 100, 2) if item in comparable else None,
+            "curtailment_rate": round(per_station[item.station_id].curtailment_rate * 100, 2) if item in comparable and per_station[item.station_id].curtailment_rate is not None else None,
             "status": "complete" if item in comparable else ("missing_fields" if item not in field_complete else "anomaly"),
         } for item in snapshots],
         "comparable_station_count": len(comparable),
@@ -235,10 +246,14 @@ def latest_nwp():
             if "." in valid:
                 head, tail = valid.split(".", 1)
                 valid = f"{head}.{tail[:3].rstrip('Z')}Z"
-            item["forecast"].setdefault(valid, {}).update(row.get("variables", {}))
+            valid_cn = row.get("valid_time_cn")
+            if not valid_cn:
+                valid_cn = (datetime.fromisoformat(valid.replace("Z", "+00:00")).astimezone(CN_TZ).isoformat())
+            entry = item["forecast"].setdefault(valid, {"valid_time_utc": valid, "valid_time_cn": valid_cn, "variables": {}})
+            entry["variables"].update(row.get("variables", {}))
     stations = []
     for item in merged.values():
-        item["forecast"] = [{"valid_time_utc": key, "variables": value} for key, value in sorted(item["forecast"].items())]
+        item["forecast"] = sorted(item["forecast"].values(), key=lambda point: point["valid_time_utc"])
         stations.append(item)
     return {"available": True, "issued_at_utc": payload.get("issued_at_utc"), "issued_at_cn": payload.get("issued_at_cn"), "source_file": payload.get("source_file"), "age_hours": age_hours, "freshness": "stale" if age_hours is not None and age_hours > 12 else "latest", "refresh_required": age_hours is not None and age_hours > 12, "stations": stations}
 

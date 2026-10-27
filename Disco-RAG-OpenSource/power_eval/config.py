@@ -9,7 +9,7 @@ from pathlib import Path
 class PowerEvalConfig:
     api_key: str
     model: str = "Qwen3.8-27B"
-    base_url: str = "http://127.0.0.1:8001/v1"
+    base_url: str = "http://127.0.0.1:8002/v1"
     temperature: float = 0.0
     max_tokens: int = 1024
     timeout_seconds: float = 120.0

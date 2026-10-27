@@ -2,15 +2,23 @@
 
 日期：2026-10-14。验证只使用合成张量或临时生成的合成 CSV；未复制真实数据，也未重新启动正式场站训练。
 
+## 文档一致性修订（2026-10-27）
+
+- 风电历史窗口 288、光伏 96；输入维度固定 17/18，气象通道不足 10 个时显式报错。
+- 新增 `nwp.py`：`ISSUE_TIME <= origin`、UTC→UTC+8、15 分钟线性插值；`--future-source measured` 为显式消融并在 `meta.json` 标记。
+- 训练目标改为文档组合损失，并在 `training_log.csv` 记录各分项。
+- 新增合成测试：光伏 96 步、NWP 起报约束/插值、ECMWF 变量别名、组合损失、气象通道保留；当前 `test_model.py + test_pipeline.py` 共 14 项通过。
+- 修复 Windows 下 `np.load(mmap_mode="r")` 持有文件句柄导致临时目录无法删除的问题。
+
 ## 执行环境
 
-Python 3.13.13、NumPy 2.5.0、pandas 3.0.3、PyTorch 2.13.0+cu130。所有模型与训练冒烟检查使用 CPU。声明的依赖范围不是对全部版本组合都已验证的承诺。
+本次文档一致性修订的测试在 Python 3.11.9、NumPy 2.4.6、pandas 3.0.4、PyTorch 2.9.1 上执行（CPU）。历史整理记录的环境为 Python 3.13.13、NumPy 2.5.0、pandas 3.0.3、PyTorch 2.13.0+cu130。声明的依赖范围不是对全部版本组合都已验证的承诺。
 
 ## 检查结果
 
 | 检查 | 结果 |
 |---|---|
-| `python -m unittest discover -s tests -v` | 10 项测试通过 |
+| `python -m unittest discover -s tests -v` | 13 项测试通过 |
 | 16 步风电/PV 输出头、容量解码、光伏夜间掩码 | 通过 |
 | AutoDA 与预测器联合反向传播 | 通过，双方参数有非零梯度 |
 | 合成 CSV → 分场站准备 → full/noAutoDA 各 1 epoch → 检查点评估 | 通过；重新评估预测与原保存预测一致 |

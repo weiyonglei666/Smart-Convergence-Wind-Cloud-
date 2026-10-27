@@ -30,5 +30,5 @@ def test_default_cli_uses_entire_benchmark_and_five_methods(tmp_path):
     env.update(POWER_CORPUS_ROOT=str(corpus), ELECBENCH_ROOT=str(benchmark))
     result = subprocess.run([sys.executable, 'scripts/run_power_eval.py', '--dry-run'],
                             cwd=ROOT, env=env, capture_output=True, text=True, check=True)
-    assert 'ElecBench questions: 205' in result.stdout
+    assert 'Evaluation questions: 205' in result.stdout
     assert 'disco_full, without_rst, without_graph, without_planning, standard_rag' in result.stdout

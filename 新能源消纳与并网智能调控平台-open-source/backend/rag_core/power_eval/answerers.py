@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -32,7 +32,7 @@ class BaseAnswerer:
         self.generator, self.index, self.name = generator, index, name
 
     def retrieve(self, question: str) -> list[SearchHit]:
-        return self.index.search(question, 5)
+        return self.index.search(question, 10)
 
     def answer(self, question: str) -> AnswerResult:
         hits = self.retrieve(question)
@@ -66,7 +66,7 @@ class GraphRAGAnswerer(BaseAnswerer):
         self.graph = graph
 
     def retrieve(self, question: str) -> list[SearchHit]:
-        return self.graph.retrieve(question, 5)
+        return self.graph.retrieve(question, 10)
 
 
 class PlannedAnswerer(BaseAnswerer):
@@ -81,7 +81,7 @@ class DiscoRAGAnswerer(PlannedAnswerer):
     def __init__(self, generator: TextGenerator, index: VectorIndex):
         super().__init__(generator, index, "disco_rag")
         model_name = getattr(getattr(generator, "config", None), "model", "DeepSeek-V4.1-Flash")
-        self.pipeline = CloudDiscoRAGPipeline(index, ChatCloudLLM(generator, model_name), top_k=5)
+        self.pipeline = CloudDiscoRAGPipeline(index, ChatCloudLLM(generator, model_name), top_k=10)
 
     def answer(self, question: str) -> AnswerResult:
         result = self.pipeline.run(question)

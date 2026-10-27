@@ -8,14 +8,16 @@ from pathlib import Path
 @dataclass(frozen=True)
 class PowerEvalConfig:
     api_key: str
-    model: str = "DeepSeek-V4.1-Flash"
-    base_url: str = "https://api.deepseek.com"
+    model: str = "Qwen3.8-27B"
+    base_url: str = "http://127.0.0.1:8002/v1"
     temperature: float = 0.0
     max_tokens: int = 1024
     timeout_seconds: float = 120.0
-    top_k: int = 5
-    corpus_root: Path = Path("../PowerGridQA-main/PowerGridQA-main")
-    benchmark_root: Path = Path("../ElecBench-a-Power-Dispatch-Evaluation-Benchmark-for-Large-Language-Models")
+    top_k: int = 10
+    corpus_root: Path = Path("data/knowledge")
+    benchmark_root: Path = Path("data/powergridqa")
+    rag_mode: str = "disco"
+    rst_cache: str = ""
 
     @property
     def api_model(self) -> str:
@@ -31,12 +33,14 @@ class PowerEvalConfig:
             raise RuntimeError("POWER_LLM_API_KEY (or DEEPSEEK_API_KEY) is not set; put the key in the environment, never in source code")
         return cls(
             api_key=key,
-            model=os.getenv("POWER_LLM_MODEL", "DeepSeek-V4.1-Flash"),
-            base_url=os.getenv("POWER_LLM_BASE_URL", os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")).rstrip("/"),
+            model=os.getenv("POWER_LLM_MODEL", "Qwen3.8-27B"),
+            base_url=os.getenv("POWER_LLM_BASE_URL", os.getenv("DEEPSEEK_BASE_URL", "http://127.0.0.1:8002/v1")).rstrip("/"),
             temperature=float(os.getenv("POWER_LLM_TEMPERATURE", "0")),
             max_tokens=int(os.getenv("POWER_LLM_MAX_TOKENS", "1024")),
             timeout_seconds=float(os.getenv("POWER_LLM_TIMEOUT", "120")),
-            top_k=int(os.getenv("POWER_RAG_TOP_K", "5")),
-            corpus_root=Path(os.getenv("POWER_CORPUS_ROOT", "../PowerGridQA-main/PowerGridQA-main")),
-            benchmark_root=Path(os.getenv("ELECBENCH_ROOT", "../ElecBench-a-Power-Dispatch-Evaluation-Benchmark-for-Large-Language-Models")),
+            top_k=int(os.getenv("POWER_RAG_TOP_K", "10")),
+            corpus_root=Path(os.getenv("POWER_CORPUS_ROOT", "data/knowledge")),
+            benchmark_root=Path(os.getenv("ELECBENCH_ROOT", "data/powergridqa")),
+            rag_mode=os.getenv("RAG_MODE", "disco"),
+            rst_cache=os.getenv("RST_CACHE", ""),
         )
